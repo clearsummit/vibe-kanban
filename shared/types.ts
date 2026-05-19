@@ -883,9 +883,15 @@ sdp: string,
  */
 session_id: string, };
 
-export type ClaudeAccount = { id: string, label: string, email: string | null, created_at: string, last_used_at: string | null, status: ClaudeAccountStatus, throttled_until: string | null, throttle_reason: ClaudeAccountThrottleReason | null, five_hour_window: ClaudeAccountUsageWindow, weekly_window: ClaudeAccountUsageWindow, last_error: ClaudeAccountLastError | null, };
+export type ClaudeAccount = { id: string, label: string, email: string | null, created_at: string, last_used_at: string | null, status: ClaudeAccountStatus, throttled_until: string | null, throttle_reason: ClaudeAccountThrottleReason | null, five_hour_window: ClaudeAccountUsageWindow, weekly_window: ClaudeAccountUsageWindow, last_error: ClaudeAccountLastError | null, 
+/**
+ * User-configurable rotation precedence. Lower values are picked first.
+ * On enroll, assigned to `max(existing) + 1` so new accounts go to the
+ * end of the rotation order. Re-orderable from Settings.
+ */
+precedence: number, };
 
-export type ClaudeAccountView = { id: string, label: string, email: string | null, created_at: string, last_used_at: string | null, status: ClaudeAccountStatus, throttled_until: string | null, throttle_reason: ClaudeAccountThrottleReason | null, five_hour_window: ClaudeAccountUsageWindow, weekly_window: ClaudeAccountUsageWindow, last_error: ClaudeAccountLastError | null, };
+export type ClaudeAccountView = { id: string, label: string, email: string | null, created_at: string, last_used_at: string | null, status: ClaudeAccountStatus, throttled_until: string | null, throttle_reason: ClaudeAccountThrottleReason | null, five_hour_window: ClaudeAccountUsageWindow, weekly_window: ClaudeAccountUsageWindow, last_error: ClaudeAccountLastError | null, precedence: number, };
 
 export type ClaudeAccountStatus = "active" | "throttled" | "needs_reauth" | "disabled";
 
@@ -924,6 +930,12 @@ export type ClaudeOAuthStartResponse = { auth_url: string, state: string, };
 export type ClaudeOAuthCompleteRequest = { state: string, code: string, };
 
 export type UpdateClaudeAccount = { label: string | null, disabled: boolean | null, };
+
+export type ReorderClaudeAccounts = { 
+/**
+ * Full desired ordering by id, highest-precedence first.
+ */
+order: Array<string>, };
 
 export const DEFAULT_PR_DESCRIPTION_PROMPT = "Update the PR that was just created with a better title and description.\nThe PR number is #{pr_number} and the URL is {pr_url}.\n\nAnalyze the changes in this branch and write:\n1. A concise, descriptive title that summarizes the changes, postfixed with \"(Vibe Kanban)\"\n2. A detailed description that explains:\n   - What changes were made\n   - Why they were made (based on the task context)\n   - Any important implementation details\n   - At the end, include a note: \"This PR was written using [Vibe Kanban](https://vibekanban.com)\"\n\nUse the appropriate CLI tool to update the PR (gh pr edit for GitHub, az repos pr update for Azure DevOps).";
 

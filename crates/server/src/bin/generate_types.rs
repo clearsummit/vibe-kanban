@@ -281,6 +281,7 @@ fn generate_types_content() -> String {
         services::services::claude_accounts::oauth::ClaudeOAuthStartResponse::decl(),
         services::services::claude_accounts::oauth::ClaudeOAuthCompleteRequest::decl(),
         server::routes::claude_accounts::UpdateClaudeAccount::decl(),
+        server::routes::claude_accounts::ReorderClaudeAccounts::decl(),
     ];
 
     let body = decls

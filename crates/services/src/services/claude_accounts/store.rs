@@ -55,7 +55,18 @@ impl ClaudeAccountsStore {
         }
         let bytes = std::fs::read(&self.path)?;
         match serde_json::from_slice::<Vec<ClaudeAccount>>(&bytes) {
-            Ok(loaded) => {
+            Ok(mut loaded) => {
+                // Backfill precedence for accounts persisted before the field
+                // existed (all defaulted to 0 by serde). If we see more than
+                // one zero, assign each a stable sequential precedence based
+                // on its created_at order so they actually sort.
+                if loaded.iter().filter(|a| a.precedence == 0).count() > 1 {
+                    let mut indices: Vec<usize> = (0..loaded.len()).collect();
+                    indices.sort_by_key(|i| loaded[*i].created_at);
+                    for (new_p, idx) in indices.into_iter().enumerate() {
+                        loaded[idx].precedence = new_p as i32;
+                    }
+                }
                 *self.accounts.write().await = loaded;
                 Ok(())
             }
@@ -87,12 +98,11 @@ impl ClaudeAccountsStore {
     }
 
     pub async fn list_views(&self) -> Vec<ClaudeAccountView> {
-        self.accounts
-            .read()
-            .await
-            .iter()
-            .map(ClaudeAccountView::from)
-            .collect()
+        let guard = self.accounts.read().await;
+        let mut views: Vec<ClaudeAccountView> = guard.iter().map(ClaudeAccountView::from).collect();
+        // Surface in precedence order so the UI table matches the rotation order.
+        views.sort_by_key(|v| v.precedence);
+        views
     }
 
     pub async fn list_full(&self) -> Vec<ClaudeAccount> {
@@ -110,6 +120,7 @@ impl ClaudeAccountsStore {
     ) -> Result<ClaudeAccountView, StoreError> {
         let mut guard = self.accounts.write().await;
         let next_index = guard.len() + 1;
+        let next_precedence = guard.iter().map(|a| a.precedence).max().unwrap_or(-1) + 1;
         let label = oauth_info
             .and_then(|i| i.email.clone())
             .unwrap_or_else(|| format!("Account {next_index}"));
@@ -126,12 +137,56 @@ impl ClaudeAccountsStore {
             five_hour_window: ClaudeAccountUsageWindow::default(),
             weekly_window: ClaudeAccountUsageWindow::default(),
             last_error: None,
+            precedence: next_precedence,
             credentials: creds,
         };
         let view = ClaudeAccountView::from(&account);
         guard.push(account);
         self.save_locked(&guard).await?;
         Ok(view)
+    }
+
+    /// Replace the rotation precedence of every account in one shot. The
+    /// caller supplies the desired full ordering — the i-th id in `order`
+    /// gets precedence `i`. Ids not present in `order` are pushed to the
+    /// end with their existing relative order preserved (defensive: a
+    /// stale client that misses a newly-enrolled account doesn't lose it).
+    pub async fn reorder(&self, order: &[Uuid]) -> Result<Vec<ClaudeAccountView>, StoreError> {
+        let mut guard = self.accounts.write().await;
+
+        // Build the new precedence map. First pass: positions from the
+        // supplied order. Second pass: any account not in `order` gets the
+        // next available slot, preserving its current relative ordering.
+        let mut new_precedence: std::collections::HashMap<Uuid, i32> =
+            std::collections::HashMap::new();
+        let mut next: i32 = 0;
+        for id in order {
+            if guard.iter().any(|a| a.id == *id) && !new_precedence.contains_key(id) {
+                new_precedence.insert(*id, next);
+                next += 1;
+            }
+        }
+        // Anything not assigned yet, sorted by current precedence asc.
+        let mut leftovers: Vec<&ClaudeAccount> = guard
+            .iter()
+            .filter(|a| !new_precedence.contains_key(&a.id))
+            .collect();
+        leftovers.sort_by_key(|a| a.precedence);
+        for acct in leftovers {
+            new_precedence.insert(acct.id, next);
+            next += 1;
+        }
+
+        for acct in guard.iter_mut() {
+            if let Some(p) = new_precedence.get(&acct.id) {
+                acct.precedence = *p;
+            }
+        }
+        // Sort the in-memory Vec so the file is human-readable in precedence order.
+        guard.sort_by_key(|a| a.precedence);
+        let views: Vec<ClaudeAccountView> = guard.iter().map(ClaudeAccountView::from).collect();
+        self.save_locked(&guard).await?;
+        Ok(views)
     }
 
     pub async fn replace_credentials(
@@ -276,12 +331,20 @@ impl ClaudeAccountsStore {
             return PickNextResult::NoAccountsEnrolled;
         }
 
-        // Healthy accounts, ordered by least-recently-used.
+        // Healthy accounts, ordered by user-configured precedence (lower =
+        // higher priority). Tie-break by least-recently-used so accounts at
+        // the same precedence level still spread load evenly.
         let mut healthy: Vec<&ClaudeAccount> = guard
             .iter()
             .filter(|a| a.status == ClaudeAccountStatus::Active && !exclude.contains(&a.id))
             .collect();
-        healthy.sort_by_key(|a| a.last_used_at.unwrap_or(a.created_at));
+        healthy.sort_by(|a, b| {
+            a.precedence.cmp(&b.precedence).then_with(|| {
+                a.last_used_at
+                    .unwrap_or(a.created_at)
+                    .cmp(&b.last_used_at.unwrap_or(b.created_at))
+            })
+        });
         if let Some(chosen) = healthy.first() {
             return PickNextResult::Account((*chosen).clone());
         }
@@ -515,5 +578,49 @@ mod tests {
         let (_tmp, store) = fresh_store().await;
         let err = store.remove(Uuid::new_v4()).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn add_assigns_increasing_precedence() {
+        let (_tmp, store) = fresh_store().await;
+        let a = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        let b = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        let c = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        assert_eq!(a.precedence, 0);
+        assert_eq!(b.precedence, 1);
+        assert_eq!(c.precedence, 2);
+    }
+
+    #[tokio::test]
+    async fn pick_next_honors_precedence_order() {
+        let (_tmp, store) = fresh_store().await;
+        let a = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        let b = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        // a has precedence 0, b has precedence 1; pick should return a.
+        match store.pick_next(&[]).await {
+            PickNextResult::Account(acct) => assert_eq!(acct.id, a.id),
+            other => panic!("expected Account, got {other:?}"),
+        }
+        // Reorder so b is first; now pick should return b.
+        store.reorder(&[b.id, a.id]).await.unwrap();
+        match store.pick_next(&[]).await {
+            PickNextResult::Account(acct) => assert_eq!(acct.id, b.id),
+            other => panic!("expected Account, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reorder_preserves_unknown_accounts_at_end() {
+        let (_tmp, store) = fresh_store().await;
+        let a = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        let b = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        let c = store.add(fake_creds(8 * 3600), None).await.unwrap();
+        // Client only knows about a + c (stale; missed b). Reorder a, c.
+        // b should keep its slot at the end, not vanish.
+        let views = store.reorder(&[c.id, a.id]).await.unwrap();
+        assert_eq!(views.len(), 3);
+        assert_eq!(views[0].id, c.id);
+        assert_eq!(views[1].id, a.id);
+        assert_eq!(views[2].id, b.id);
     }
 }

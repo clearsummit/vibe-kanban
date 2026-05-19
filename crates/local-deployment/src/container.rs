@@ -136,6 +136,15 @@ enum OutcomeDecision {
     Retry { backoff: Duration },
 }
 
+/// Privacy-safe analytics names for the claude-multi-account feature. No
+/// tokens or emails are ever forwarded — only counts, ids, and error classes.
+mod claude_analytics {
+    pub const RETRY_ATTEMPT: &str = "claude_retry_attempt";
+    pub const ROTATION: &str = "claude_rotation";
+    pub const ACCOUNT_THROTTLED: &str = "claude_account_throttled";
+    pub const ACCOUNT_NEEDS_REAUTH: &str = "claude_account_needs_reauth";
+}
+
 /// Captured at the first spawn so the exit monitor can re-run the same spawn
 /// on a retry decision without re-deriving inputs from the database.
 #[derive(Clone)]
@@ -550,25 +559,93 @@ impl LocalContainerService {
     /// the Drop-guarded tempdir + the account id chosen, or None if no
     /// accounts are enrolled / all are unusable (in which case the spawn
     /// falls back to the user's ambient ~/.claude).
+    ///
+    /// When called during a retry (i.e. `claude_retry_ctx` has an entry for
+    /// this execution_process), this honors the persisted `accounts_tried`
+    /// list and — per FR-019 — sleeps until the soonest reset if all accounts
+    /// are currently throttled, rather than silently falling back to ambient
+    /// credentials. The sleep is capped at `policy.max_backoff_seconds` and
+    /// honors the executor's cancellation token if one is registered.
     async fn prepare_claude_isolation(
         &self,
+        execution_process_id: &Uuid,
         env: &mut ExecutionEnv,
     ) -> Option<(TempCredentialDir, Uuid)> {
+        use services::services::claude_accounts::store::PickNextResult;
+
         let svc = self.claude_accounts.as_ref()?;
         if svc.store.count().await == 0 {
             return None;
         }
-        let pick = svc.store.pick_next(&[]).await;
-        let account = match pick {
-            services::services::claude_accounts::store::PickNextResult::Account(a) => a,
-            other => {
-                tracing::info!(
-                    ?other,
-                    "no healthy claude account available; falling back to ambient credentials"
-                );
-                return None;
+
+        // If we're in a retry, honor accounts_tried + enable sleep-on-throttled.
+        let (accounts_tried, in_retry) = match self.claude_retry_ctx.get(execution_process_id) {
+            Some(ctx) => (ctx.accounts_tried.clone(), true),
+            None => (Vec::new(), false),
+        };
+        let max_sleep_secs = self
+            .config
+            .read()
+            .await
+            .claude_retry_policy
+            .max_backoff_seconds as u64;
+
+        // Loop: pick → if Account, materialize. If AllThrottledUntil AND
+        // we're in a retry, sleep then retry once. Otherwise fall back.
+        let mut total_slept: u64 = 0;
+        let account = loop {
+            match svc.store.pick_next(&accounts_tried).await {
+                PickNextResult::Account(a) => break a,
+                PickNextResult::AllThrottledUntil(t) if in_retry => {
+                    let remaining = (t - chrono::Utc::now()).num_seconds().max(1) as u64;
+                    let budget = max_sleep_secs.saturating_sub(total_slept);
+                    if budget == 0 {
+                        tracing::info!(
+                            %execution_process_id,
+                            "claude prepare: all throttled and sleep budget exhausted; falling back to ambient"
+                        );
+                        return None;
+                    }
+                    let this_sleep = remaining.min(budget);
+                    tracing::info!(
+                        %execution_process_id,
+                        sleep_s = this_sleep,
+                        "claude prepare: all accounts throttled, sleeping until soonest reset (FR-019)"
+                    );
+                    let cancel = self
+                        .cancellation_tokens
+                        .read()
+                        .await
+                        .get(execution_process_id)
+                        .cloned();
+                    let cancelled = if let Some(tok) = cancel {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(this_sleep)) => false,
+                            _ = tok.cancelled() => true,
+                        }
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(this_sleep)).await;
+                        false
+                    };
+                    if cancelled {
+                        tracing::info!(%execution_process_id, "claude prepare: cancelled during sleep-until-reset");
+                        return None;
+                    }
+                    total_slept += this_sleep;
+                    // Loop again — pick_next will re-evaluate Throttled status
+                    // (the store auto-unthrottles entries whose reset has passed).
+                }
+                other => {
+                    tracing::info!(
+                        ?other,
+                        %execution_process_id,
+                        "no healthy claude account available; falling back to ambient credentials"
+                    );
+                    return None;
+                }
             }
         };
+
         let creds = match svc.get_active_credentials(account.id).await {
             Ok(c) => c,
             Err(e) => {
@@ -682,6 +759,15 @@ impl LocalContainerService {
                     backoff_s = backoff.as_secs(),
                     "claude attempt failed (Transient); sleeping then retrying same account"
                 );
+                self.track_claude_event(
+                    claude_analytics::RETRY_ATTEMPT,
+                    serde_json::json!({
+                        "execution_process_id": exec_id.to_string(),
+                        "attempt": ctx_entry.attempt_number,
+                        "backoff_seconds": backoff.as_secs(),
+                        "failure_class": "transient",
+                    }),
+                );
                 self.bump_retry_ctx(exec_id, account_id, false).await;
                 OutcomeDecision::Retry { backoff }
             }
@@ -690,6 +776,21 @@ impl LocalContainerService {
                     %exec_id,
                     attempt = ctx_entry.attempt_number,
                     "claude attempt failed (UsageExhausted); rotating to next account immediately"
+                );
+                self.track_claude_event(
+                    claude_analytics::ACCOUNT_THROTTLED,
+                    serde_json::json!({
+                        "account_id": account_id.to_string(),
+                        "execution_process_id": exec_id.to_string(),
+                    }),
+                );
+                self.track_claude_event(
+                    claude_analytics::ROTATION,
+                    serde_json::json!({
+                        "execution_process_id": exec_id.to_string(),
+                        "attempt": ctx_entry.attempt_number,
+                        "reason": "usage_exhausted",
+                    }),
                 );
                 self.bump_retry_ctx(exec_id, account_id, true).await;
                 OutcomeDecision::Retry {
@@ -701,6 +802,20 @@ impl LocalContainerService {
                     %exec_id,
                     "claude attempt failed (NeedsReauth); rotating without budget cost"
                 );
+                self.track_claude_event(
+                    claude_analytics::ACCOUNT_NEEDS_REAUTH,
+                    serde_json::json!({
+                        "account_id": account_id.to_string(),
+                        "execution_process_id": exec_id.to_string(),
+                    }),
+                );
+                self.track_claude_event(
+                    claude_analytics::ROTATION,
+                    serde_json::json!({
+                        "execution_process_id": exec_id.to_string(),
+                        "reason": "needs_reauth",
+                    }),
+                );
                 // NeedsReauth does NOT increment attempt_number per spec FR-021.
                 self.bump_retry_ctx_reauth(exec_id, account_id).await;
                 OutcomeDecision::Retry {
@@ -708,6 +823,18 @@ impl LocalContainerService {
                 }
             }
         }
+    }
+
+    /// Best-effort analytics emission for the Claude multi-account feature.
+    /// Never blocks, never panics. The user's `analytics_enabled` config
+    /// gate is enforced in `LocalDeployment::new` by whether the
+    /// `AnalyticsContext` is constructed at all.
+    fn track_claude_event(&self, event_name: &'static str, properties: serde_json::Value) {
+        let Some(ctx) = self.analytics.as_ref() else {
+            return;
+        };
+        ctx.analytics_service
+            .track_event(&ctx.user_id, event_name, Some(properties));
     }
 
     /// Increment the attempt counter and append the account to accounts_tried.
@@ -1844,7 +1971,8 @@ impl ContainerService for LocalContainerService {
             executor_action.base_executor(),
             Some(BaseCodingAgent::ClaudeCode)
         ) {
-            self.prepare_claude_isolation(&mut env).await
+            self.prepare_claude_isolation(&execution_process.id, &mut env)
+                .await
         } else {
             None
         };

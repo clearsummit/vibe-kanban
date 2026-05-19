@@ -29,6 +29,11 @@ pub struct ClaudeAccount {
     pub weekly_window: ClaudeAccountUsageWindow,
     #[serde(default)]
     pub last_error: Option<ClaudeAccountLastError>,
+    /// User-configurable rotation precedence. Lower values are picked first.
+    /// On enroll, assigned to `max(existing) + 1` so new accounts go to the
+    /// end of the rotation order. Re-orderable from Settings.
+    #[serde(default)]
+    pub precedence: i32,
 
     /// Raw OAuth credentials. NEVER serialized to TypeScript or returned in API responses.
     #[ts(skip)]
@@ -50,6 +55,7 @@ pub struct ClaudeAccountView {
     pub five_hour_window: ClaudeAccountUsageWindow,
     pub weekly_window: ClaudeAccountUsageWindow,
     pub last_error: Option<ClaudeAccountLastError>,
+    pub precedence: i32,
 }
 
 impl From<&ClaudeAccount> for ClaudeAccountView {
@@ -66,6 +72,7 @@ impl From<&ClaudeAccount> for ClaudeAccountView {
             five_hour_window: account.five_hour_window.clone(),
             weekly_window: account.weekly_window.clone(),
             last_error: account.last_error.clone(),
+            precedence: account.precedence,
         }
     }
 }

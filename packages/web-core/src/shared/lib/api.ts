@@ -106,6 +106,7 @@ import {
   ClaudeOAuthStartResponse,
   ClaudeOAuthCompleteRequest,
   UpdateClaudeAccount,
+  ReorderClaudeAccounts,
 } from 'shared/types';
 import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
@@ -1751,6 +1752,16 @@ export const claudeAccountsApi = {
     if (!response.ok && response.status !== 204) {
       throw new Error(`Failed to remove account: ${response.statusText}`);
     }
+  },
+
+  reorder: async (
+    payload: ReorderClaudeAccounts
+  ): Promise<ClaudeAccountView[]> => {
+    const response = await makeRequest('/api/claude-accounts/reorder', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return handleApiResponse<ClaudeAccountView[]>(response);
   },
 
   getRetryPolicy: async (): Promise<ClaudeRetryPolicy> => {

@@ -75,11 +75,15 @@ The `workspace` and `executor_action` are already persisted on `execution_proces
 
 | Type | Description | Action |
 |---|---|---|
-| **VALIDATION** | FR-019 sleep-until-reset path for "last account throttled" is not exercised in code; control falls through to `Fatal` once retry budget hits. | Backlog: extend exit monitor to honor `RotatorPick::SleepUntil` in respawn. |
+| **VALIDATION** | ~~FR-019 sleep-until-reset path for "last account throttled" is not exercised in code; control falls through to `Fatal` once retry budget hits.~~ | ✅ **Closed**: `prepare_claude_isolation` now loops on `PickNextResult::AllThrottledUntil` during a retry context, sleeping until the soonest reset (cancellable, capped at `policy.max_backoff_seconds`) before falling back to ambient credentials. |
 | **TEST** | T024-T030 integration tests for the retry loop never landed. The `VIBE_KANBAN_CLAUDE_TEST_FAILURE_MODE` env hook (T031) was scoped in `quickstart.md` but the executor doesn't implement it. | Backlog: add the env hook + 7 integration tests. |
 | **BACKLOG** | E2E test (Playwright) for the OAuth flow (T058) not landed. | Backlog. |
-| **BACKLOG** | Analytics events (`claude_account_enrolled`, etc., T059) not emitted. | Backlog. |
+| **VALIDATION** | ~~Analytics events (`claude_account_enrolled`, etc., T059) not emitted.~~ | ✅ **Closed**: `record_claude_spawn_outcome` emits `claude_retry_attempt`, `claude_rotation`, `claude_account_throttled`, `claude_account_needs_reauth` via `LocalContainerService::track_claude_event`. Privacy-safe (account id + execution_process id only; no tokens or emails). |
 | **BACKLOG** | User-facing docs in `docs/` (T061) not written. | Backlog. |
+
+## Post-critic enhancement: user-configurable rotation precedence
+
+Added per user feedback: accounts now carry a `precedence: i32` field that users can re-order from Settings (up/down arrows in the accounts table). `pick_next` honors precedence as the primary sort key (lower = higher priority) with `last_used_at` as a tiebreaker. `add` auto-assigns `max(existing) + 1` so new accounts land at the end. New endpoint `POST /api/claude-accounts/reorder { order: [Uuid] }` returns the updated list; stale clients that miss a newly-enrolled account keep that account at the end rather than dropping it. Backfill: accounts persisted before the field existed (default 0) get sequential precedence by `created_at` on first load.
 
 ## Recommended Actions
 

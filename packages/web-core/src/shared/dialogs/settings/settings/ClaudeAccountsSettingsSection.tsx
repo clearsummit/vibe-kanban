@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowSquareOutIcon,
+  ArrowUpIcon,
+  ArrowDownIcon,
   KeyIcon,
   PlusIcon,
   SpinnerIcon,
@@ -215,6 +217,21 @@ export function ClaudeAccountsSettingsSection() {
     [refresh]
   );
 
+  const moveAccount = useCallback(
+    async (id: string, direction: 'up' | 'down') => {
+      const ids = accounts.map((a) => a.id);
+      const idx = ids.indexOf(id);
+      if (idx === -1) return;
+      const swap = direction === 'up' ? idx - 1 : idx + 1;
+      if (swap < 0 || swap >= ids.length) return;
+      const next = [...ids];
+      [next[idx], next[swap]] = [next[swap], next[idx]];
+      const updated = await claudeAccountsApi.reorder({ order: next });
+      setAccounts(updated);
+    },
+    [accounts]
+  );
+
   return (
     <div className="space-y-6 pb-8">
       <SettingsCard
@@ -237,9 +254,14 @@ export function ClaudeAccountsSettingsSection() {
           </div>
         ) : (
           <div className="space-y-3 overflow-x-auto">
+            <p className="text-xs text-low">
+              Rotation order: accounts higher in this list are picked first.
+              Use the arrows to re-order.
+            </p>
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr className="text-left text-low border-b border-border">
+                  <th className="py-2 pr-3 font-medium">Order</th>
                   <th className="py-2 pr-3 font-medium">Account</th>
                   <th className="py-2 pr-3 font-medium">Status</th>
                   <th className="py-2 pr-3 font-medium">5-hour usage</th>
@@ -250,10 +272,15 @@ export function ClaudeAccountsSettingsSection() {
                 </tr>
               </thead>
               <tbody>
-                {accounts.map((a) => (
+                {accounts.map((a, i) => (
                   <AccountRow
                     key={a.id}
                     account={a}
+                    position={i + 1}
+                    canMoveUp={i > 0}
+                    canMoveDown={i < accounts.length - 1}
+                    onMoveUp={() => moveAccount(a.id, 'up')}
+                    onMoveDown={() => moveAccount(a.id, 'down')}
                     onRename={(label) => renameAccount(a.id, label)}
                     onToggleDisabled={() => toggleDisabled(a)}
                     onRequestRemove={() => removeAccount(a)}
@@ -371,12 +398,22 @@ export function ClaudeAccountsSettingsSection() {
 
 function AccountRow({
   account,
+  position,
+  canMoveUp,
+  canMoveDown,
+  onMoveUp,
+  onMoveDown,
   onRename,
   onToggleDisabled,
   onRequestRemove,
   onReauth,
 }: {
   account: ClaudeAccountView;
+  position: number;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
   onRename: (label: string) => void;
   onToggleDisabled: () => void;
   onRequestRemove: () => void;
@@ -409,6 +446,31 @@ function AccountRow({
 
   return (
     <tr className="border-b border-border last:border-b-0 align-middle">
+      <td className="py-3 pr-3 whitespace-nowrap">
+        <div className="flex items-center gap-1 text-low">
+          <span className="font-mono tabular-nums text-xs w-5 text-right">
+            {position}
+          </span>
+          <button
+            type="button"
+            aria-label="Move up in rotation order"
+            disabled={!canMoveUp}
+            onClick={onMoveUp}
+            className="p-0.5 disabled:opacity-30 hover:text-normal transition-colors"
+          >
+            <ArrowUpIcon />
+          </button>
+          <button
+            type="button"
+            aria-label="Move down in rotation order"
+            disabled={!canMoveDown}
+            onClick={onMoveDown}
+            className="p-0.5 disabled:opacity-30 hover:text-normal transition-colors"
+          >
+            <ArrowDownIcon />
+          </button>
+        </div>
+      </td>
       <td className="py-3 pr-3">
         {editing ? (
           <input

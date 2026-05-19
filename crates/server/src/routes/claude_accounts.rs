@@ -30,6 +30,13 @@ pub struct UpdateClaudeAccount {
     pub disabled: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct ReorderClaudeAccounts {
+    /// Full desired ordering by id, highest-precedence first.
+    pub order: Vec<Uuid>,
+}
+
 async fn list_accounts(
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<Vec<ClaudeAccountView>>>, ApiError> {
@@ -108,6 +115,19 @@ async fn delete_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn reorder_accounts(
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<ReorderClaudeAccounts>,
+) -> Result<ResponseJson<ApiResponse<Vec<ClaudeAccountView>>>, ApiError> {
+    let views = deployment
+        .claude_accounts()
+        .store
+        .reorder(&payload.order)
+        .await
+        .map_err(store_err)?;
+    Ok(ResponseJson(ApiResponse::success(views)))
+}
+
 async fn get_retry_policy(
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<ClaudeRetryPolicy>>, ApiError> {
@@ -148,6 +168,7 @@ pub fn router() -> Router<DeploymentImpl> {
             .route("/", get(list_accounts))
             .route("/oauth/start", post(oauth_start))
             .route("/oauth/complete", post(oauth_complete))
+            .route("/reorder", post(reorder_accounts))
             .route("/retry-policy", get(get_retry_policy).put(put_retry_policy))
             .route(
                 "/{id}",
