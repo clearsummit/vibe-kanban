@@ -20,8 +20,7 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     claude_accounts::{
-        ClaudeAccountsService, ClaudeAccountsStore, ClaudeOAuthClient, isolation,
-        types::TaskAttemptRetryState,
+        ClaudeAccountsService, ClaudeAccountsStore, ClaudeOAuthClient, ClaudeRetryState, isolation,
     },
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
@@ -188,7 +187,7 @@ impl Deployment for LocalDeployment {
         ));
         // Best-effort startup sweeps.
         isolation::sweep_orphaned_tmp_dirs(chrono::Utc::now());
-        TaskAttemptRetryState::sweep_stale(chrono::Utc::now());
+        ClaudeRetryState::sweep_stale(chrono::Utc::now());
 
         let api_base = std::env::var("VK_SHARED_API_BASE")
             .ok()

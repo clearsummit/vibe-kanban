@@ -1,6 +1,6 @@
 //! Data-model types for multi-account Claude OAuth.
 
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -212,97 +212,6 @@ impl ClaudeRetryPolicy {
             (self.initial_backoff_seconds as f64) * (self.backoff_multiplier as f64).powi(exponent);
         let capped = raw.min(self.max_backoff_seconds as f64);
         Duration::from_secs(capped.round().max(0.0) as u64)
-    }
-}
-
-/// Per-task-attempt retry state. Persisted so a crash mid-back-off doesn't reset
-/// the retry budget on resume.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct TaskAttemptRetryState {
-    pub task_attempt_id: Uuid,
-    pub attempt_number: u32,
-    pub last_failure_class: Option<FailureClass>,
-    pub last_backoff_seconds: u32,
-    pub accounts_tried: Vec<Uuid>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl TaskAttemptRetryState {
-    pub fn new(task_attempt_id: Uuid) -> Self {
-        Self {
-            task_attempt_id,
-            attempt_number: 1,
-            last_failure_class: None,
-            last_backoff_seconds: 0,
-            accounts_tried: Vec::new(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    fn path_for(task_attempt_id: Uuid) -> PathBuf {
-        utils::assets::claude_retry_state_dir().join(format!("{task_attempt_id}.json"))
-    }
-
-    pub async fn load_for(task_attempt_id: Uuid) -> Option<Self> {
-        let path = Self::path_for(task_attempt_id);
-        if !path.exists() {
-            return None;
-        }
-        let bytes = std::fs::read(&path).ok()?;
-        match serde_json::from_slice::<Self>(&bytes) {
-            Ok(state) => Some(state),
-            Err(e) => {
-                tracing::warn!(?e, ?path, "failed to parse retry state file; ignoring");
-                None
-            }
-        }
-    }
-
-    pub async fn save(&self) -> std::io::Result<()> {
-        let path = Self::path_for(self.task_attempt_id);
-        let tmp = path.with_extension("tmp");
-        let mut opts = std::fs::OpenOptions::new();
-        opts.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let file = opts.open(&tmp)?;
-        serde_json::to_writer_pretty(&file, self)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-
-    pub async fn delete(task_attempt_id: Uuid) -> std::io::Result<()> {
-        let path = Self::path_for(task_attempt_id);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Delete retry-state files older than 30 days. Called from the server startup sweep.
-    pub fn sweep_stale(now: DateTime<Utc>) {
-        let dir = utils::assets::claude_retry_state_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return;
-        };
-        let cutoff = now - chrono::Duration::days(30);
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            let Ok(modified) = meta.modified() else {
-                continue;
-            };
-            let modified_chrono: DateTime<Utc> = modified.into();
-            if modified_chrono < cutoff {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
     }
 }
 

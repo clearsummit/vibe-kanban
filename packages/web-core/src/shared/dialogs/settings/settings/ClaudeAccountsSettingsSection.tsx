@@ -237,6 +237,21 @@ export function ClaudeAccountsSettingsSection() {
     [refresh]
   );
 
+  /// Wrap a possibly-rejecting async callback so we never leak unhandled
+  /// promise rejections to the browser. On error, surface via the same
+  /// `loadError` banner used by `refresh` failures so the user gets an
+  /// actionable message instead of a silent crash.
+  const safe = useCallback(
+    <Args extends unknown[]>(fn: (...args: Args) => Promise<unknown>) => {
+      return (...args: Args) => {
+        fn(...args).catch((e) =>
+          setLoadError(e instanceof Error ? e.message : String(e))
+        );
+      };
+    },
+    []
+  );
+
   const moveAccount = useCallback(
     async (id: string, direction: 'up' | 'down') => {
       const ids = accounts.map((a) => a.id);
@@ -284,7 +299,7 @@ export function ClaudeAccountsSettingsSection() {
             <p className="text-sm text-low">
               {t('settings.claude-accounts.emptyState')}
             </p>
-            <PrimaryButton onClick={() => startAdd(null)}>
+            <PrimaryButton onClick={safe(() => startAdd(null))}>
               <PlusIcon /> {t('settings.claude-accounts.addAccount')}
             </PrimaryButton>
           </div>
@@ -328,17 +343,19 @@ export function ClaudeAccountsSettingsSection() {
                     position={i + 1}
                     canMoveUp={i > 0}
                     canMoveDown={i < accounts.length - 1}
-                    onMoveUp={() => moveAccount(a.id, 'up')}
-                    onMoveDown={() => moveAccount(a.id, 'down')}
-                    onRename={(label) => renameAccount(a.id, label)}
-                    onToggleDisabled={() => toggleDisabled(a)}
-                    onRequestRemove={() => removeAccount(a)}
-                    onReauth={() => startAdd(a.id)}
+                    onMoveUp={safe(() => moveAccount(a.id, 'up'))}
+                    onMoveDown={safe(() => moveAccount(a.id, 'down'))}
+                    onRename={safe((label: string) =>
+                      renameAccount(a.id, label)
+                    )}
+                    onToggleDisabled={safe(() => toggleDisabled(a))}
+                    onRequestRemove={safe(() => removeAccount(a))}
+                    onReauth={safe(() => startAdd(a.id))}
                   />
                 ))}
               </tbody>
             </table>
-            <PrimaryButton onClick={() => startAdd(null)}>
+            <PrimaryButton onClick={safe(() => startAdd(null))}>
               <PlusIcon /> {t('settings.claude-accounts.addAccount')}
             </PrimaryButton>
           </div>

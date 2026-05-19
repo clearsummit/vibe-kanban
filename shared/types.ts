@@ -921,8 +921,6 @@ backoff_multiplier: number,
  */
 max_backoff_seconds: number, };
 
-export type TaskAttemptRetryState = { task_attempt_id: string, attempt_number: number, last_failure_class: FailureClass | null, last_backoff_seconds: number, accounts_tried: Array<string>, updated_at: string, };
-
 export type ClaudeOAuthStartRequest = { account_id: string | null, };
 
 export type ClaudeOAuthStartResponse = { auth_url: string, state: string, };

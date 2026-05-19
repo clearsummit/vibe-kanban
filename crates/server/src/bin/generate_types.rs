@@ -276,7 +276,6 @@ fn generate_types_content() -> String {
         services::services::claude_accounts::types::ClaudeAccountLastError::decl(),
         services::services::claude_accounts::types::FailureClass::decl(),
         services::services::claude_accounts::types::ClaudeRetryPolicy::decl(),
-        services::services::claude_accounts::types::TaskAttemptRetryState::decl(),
         services::services::claude_accounts::oauth::ClaudeOAuthStartRequest::decl(),
         services::services::claude_accounts::oauth::ClaudeOAuthStartResponse::decl(),
         services::services::claude_accounts::oauth::ClaudeOAuthCompleteRequest::decl(),

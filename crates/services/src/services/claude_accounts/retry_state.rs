@@ -84,6 +84,26 @@ impl ClaudeRetryState {
         }
     }
 
+    /// Delete retry-state files older than 30 days. Called from the server
+    /// startup sweep so stale, never-resumed records don't pile up forever.
+    pub fn sweep_stale(now: DateTime<Utc>) {
+        let dir = utils::assets::claude_retry_state_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let cutoff = now - chrono::Duration::days(30);
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let modified_chrono: DateTime<Utc> = modified.into();
+            if modified_chrono < cutoff {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
     /// Enumerate all persisted retry-state files. Called from the startup
     /// resume sweep; corrupt files have already been renamed to .bad by
     /// `load_for`.

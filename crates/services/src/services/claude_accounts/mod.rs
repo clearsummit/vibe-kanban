@@ -22,5 +22,5 @@ pub use store::{ClaudeAccountsService, ClaudeAccountsStore};
 pub use types::{
     ClaudeAccount, ClaudeAccountLastError, ClaudeAccountStatus, ClaudeAccountThrottleReason,
     ClaudeAccountUsageWindow, ClaudeAccountView, ClaudeOAuthCredentials, ClaudeRetryPolicy,
-    FailureClass, TaskAttemptRetryState,
+    FailureClass,
 };
