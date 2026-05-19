@@ -44,7 +44,8 @@ use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
     claude_accounts::{
-        ClaudeAccountsService, TempCredentialDir, classify_failure, types::FailureClass,
+        ClaudeAccountsService, Rotator, RotatorDecision, TempCredentialDir, classify_failure,
+        types::ClaudeRetryPolicy,
     },
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
@@ -121,6 +122,32 @@ pub struct LocalContainerService {
     /// Tracks which Claude account each running spawn is using, so the exit
     /// monitor can record success/failure against the right account.
     claude_spawn_accounts: Arc<DashMap<Uuid, Uuid>>,
+    /// Per-execution-process retry context. Populated at the first spawn of
+    /// a Claude executor; consulted in the exit monitor to decide whether to
+    /// sleep + respawn the SAME execution_process or let it fail.
+    claude_retry_ctx: Arc<DashMap<Uuid, ClaudeRetryCtx>>,
+}
+
+/// Whether the exit monitor should continue with the normal completion path
+/// (success or hard failure) or sleep for `backoff` and respawn the same
+/// execution_process.
+enum OutcomeDecision {
+    Continue,
+    Retry { backoff: Duration },
+}
+
+/// Captured at the first spawn so the exit monitor can re-run the same spawn
+/// on a retry decision without re-deriving inputs from the database.
+#[derive(Clone)]
+struct ClaudeRetryCtx {
+    workspace: Workspace,
+    executor_action: ExecutorAction,
+    policy: ClaudeRetryPolicy,
+    /// 1-indexed attempt count. Incremented before each retry.
+    attempt_number: u32,
+    /// Account ids already tried on this attempt, used by the rotator to
+    /// avoid re-picking an account in the same task attempt.
+    accounts_tried: Vec<Uuid>,
 }
 
 impl LocalContainerService {
@@ -165,6 +192,7 @@ impl LocalContainerService {
             claude_accounts,
             claude_spawn_dirs: Arc::new(DashMap::new()),
             claude_spawn_accounts: Arc::new(DashMap::new()),
+            claude_retry_ctx: Arc::new(DashMap::new()),
         };
 
         container.spawn_workspace_cleanup();
@@ -574,27 +602,31 @@ impl LocalContainerService {
     }
 
     /// Called from the exit monitor on every executor exit. If this spawn
-    /// used an enrolled Claude account, classify the failure (or success)
-    /// from the captured msg_store output and record it to the store so the
-    /// account's status flips appropriately (Throttled / NeedsReauth /
-    /// last-error) and the next task attempt rotates to a different account.
+    /// used an enrolled Claude account, classify the outcome, record it
+    /// against the account, AND consult the rotator to decide whether the
+    /// exit monitor should sleep + respawn this execution_process.
+    ///
+    /// Returns `OutcomeDecision::Continue` for normal exits (success or
+    /// non-retryable failure — let the existing pipeline mark the process
+    /// completed/failed), or `OutcomeDecision::Retry { backoff }` to drive
+    /// the exit monitor into a `tokio::time::sleep(backoff)` + respawn loop
+    /// against the SAME execution_process.id.
     async fn record_claude_spawn_outcome(
         &self,
         exec_id: &Uuid,
         exit_code: Option<i64>,
         msg_store: Option<Arc<MsgStore>>,
-    ) {
-        // Always reap the tempdir + account-id mapping.
+    ) -> OutcomeDecision {
+        // Always reap the tempdir.
         self.claude_spawn_dirs.remove(exec_id);
         let Some((_, account_id)) = self.claude_spawn_accounts.remove(exec_id) else {
-            return;
+            return OutcomeDecision::Continue;
         };
         let Some(svc) = self.claude_accounts.clone() else {
-            return;
+            return OutcomeDecision::Continue;
         };
 
-        // Capture the executor's stderr/stdout for the classifier. If the
-        // msg_store isn't around any more we still record a generic failure.
+        // Combined CLI output for the classifier.
         let combined = match msg_store {
             Some(store) => collect_msg_store_text(&store).await,
             None => String::new(),
@@ -605,45 +637,118 @@ impl LocalContainerService {
             if let Err(e) = svc.record_success(account_id).await {
                 tracing::warn!(?e, %account_id, "failed to record claude account success");
             }
-            return;
+            // Done with this attempt: clear retry context.
+            self.claude_retry_ctx.remove(exec_id);
+            return OutcomeDecision::Continue;
         }
 
-        // Failure path: classify from the captured output. The classifier is
-        // intentionally conservative — only the exact "Claude AI usage limit
-        // reached" signal flips an account to Throttled.
         let class = classify_failure(&combined, "", exit_code.map(|c| c as i32));
-        match class {
-            FailureClass::UsageExhausted => {
-                let now = chrono::Utc::now();
-                let (until, reason) = services::services::claude_accounts::parse_usage_reset(
-                    &combined,
-                    now,
-                )
-                .unwrap_or_else(|| {
-                    let reason =
-                        services::services::claude_accounts::types::ClaudeAccountThrottleReason::FiveHour;
-                    (
-                        services::services::claude_accounts::classifier::fallback_reset(reason, now),
-                        reason,
-                    )
-                });
-                if let Err(e) = svc.store.mark_throttled(account_id, until, reason).await {
-                    tracing::warn!(?e, %account_id, "failed to mark claude account throttled");
+
+        // Pull the retry context. If absent, just record the failure and
+        // continue (the executor wasn't claude, or no accounts are enrolled).
+        let Some(ctx_entry) = self.claude_retry_ctx.get(exec_id).map(|e| e.clone()) else {
+            let msg = combined.chars().take(512).collect::<String>();
+            let _ = svc.store.record_failure(account_id, class, msg).await;
+            return OutcomeDecision::Continue;
+        };
+
+        // Ask the rotator what to do. on_failure mutates the store
+        // (Throttled / NeedsReauth flags) as a side effect.
+        let rotator = Rotator::new(svc.clone(), ctx_entry.policy);
+        let decision = match rotator
+            .on_failure(account_id, class, ctx_entry.attempt_number, &combined)
+            .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(?e, %account_id, "rotator.on_failure errored; failing attempt");
+                self.claude_retry_ctx.remove(exec_id);
+                return OutcomeDecision::Continue;
+            }
+        };
+
+        match decision {
+            RotatorDecision::Fatal => {
+                self.claude_retry_ctx.remove(exec_id);
+                OutcomeDecision::Continue
+            }
+            RotatorDecision::RetrySame { backoff } => {
+                tracing::info!(
+                    %exec_id,
+                    attempt = ctx_entry.attempt_number,
+                    backoff_s = backoff.as_secs(),
+                    "claude attempt failed (Transient); sleeping then retrying same account"
+                );
+                self.bump_retry_ctx(exec_id, account_id, false).await;
+                OutcomeDecision::Retry { backoff }
+            }
+            RotatorDecision::RotateNext => {
+                tracing::info!(
+                    %exec_id,
+                    attempt = ctx_entry.attempt_number,
+                    "claude attempt failed (UsageExhausted); rotating to next account immediately"
+                );
+                self.bump_retry_ctx(exec_id, account_id, true).await;
+                OutcomeDecision::Retry {
+                    backoff: Duration::from_millis(0),
                 }
             }
-            FailureClass::NeedsReauth => {
-                let msg = combined.chars().take(512).collect::<String>();
-                if let Err(e) = svc.store.mark_needs_reauth(account_id, msg).await {
-                    tracing::warn!(?e, %account_id, "failed to mark claude account needs reauth");
-                }
-            }
-            FailureClass::Transient | FailureClass::Fatal => {
-                let msg = combined.chars().take(512).collect::<String>();
-                if let Err(e) = svc.store.record_failure(account_id, class, msg).await {
-                    tracing::warn!(?e, %account_id, "failed to record claude account failure");
+            RotatorDecision::MarkReauthAndRotate => {
+                tracing::info!(
+                    %exec_id,
+                    "claude attempt failed (NeedsReauth); rotating without budget cost"
+                );
+                // NeedsReauth does NOT increment attempt_number per spec FR-021.
+                self.bump_retry_ctx_reauth(exec_id, account_id).await;
+                OutcomeDecision::Retry {
+                    backoff: Duration::from_millis(0),
                 }
             }
         }
+    }
+
+    /// Increment the attempt counter and append the account to accounts_tried.
+    /// `consumed_budget` is informational here — we always bump because both
+    /// RetrySame and RotateNext count against the retry budget per FR-020.
+    async fn bump_retry_ctx(&self, exec_id: &Uuid, account_id: Uuid, _consumed_budget: bool) {
+        if let Some(mut entry) = self.claude_retry_ctx.get_mut(exec_id) {
+            entry.attempt_number = entry.attempt_number.saturating_add(1);
+            if !entry.accounts_tried.contains(&account_id) {
+                entry.accounts_tried.push(account_id);
+            }
+        }
+    }
+
+    /// NeedsReauth-specific bump: append the account so we don't pick it
+    /// again, but don't increment attempt_number (FR-021).
+    async fn bump_retry_ctx_reauth(&self, exec_id: &Uuid, account_id: Uuid) {
+        if let Some(mut entry) = self.claude_retry_ctx.get_mut(exec_id) {
+            if !entry.accounts_tried.contains(&account_id) {
+                entry.accounts_tried.push(account_id);
+            }
+        }
+    }
+
+    /// Respawn the same execution_process after a retry decision. Reuses the
+    /// captured workspace + executor_action; the new spawn replaces the old
+    /// child in child_store and re-arms the exit monitor. The MsgStore
+    /// continues to accumulate so retry attempts are visible in logs.
+    async fn respawn_for_retry(&self, exec_id: &Uuid) -> Result<(), ContainerError> {
+        let ctx = self.claude_retry_ctx.get(exec_id).map(|e| e.clone());
+        let Some(ctx) = ctx else {
+            return Err(ContainerError::Other(anyhow!(
+                "no retry context for execution {exec_id}"
+            )));
+        };
+        // Look up the latest execution_process row (DB-backed, in case
+        // anything has moved).
+        let execution_process = ExecutionProcess::find_by_id(&self.db.pool, *exec_id)
+            .await?
+            .ok_or_else(|| {
+                ContainerError::Other(anyhow!("execution_process {exec_id} disappeared"))
+            })?;
+        self.start_execution_inner(&ctx.workspace, &execution_process, &ctx.executor_action)
+            .await
     }
 
     fn spawn_exit_monitor(
@@ -710,11 +815,57 @@ impl LocalContainerService {
 
             // If this spawn used an enrolled Claude account, classify the
             // outcome and flip the account's status (Throttled / NeedsReauth /
-            // last-error). Subsequent task attempts will rotate accordingly.
+            // last-error). The decision tells us whether to sleep + respawn
+            // the SAME execution_process (auto-retry on Transient or
+            // UsageExhausted) or fall through to the normal completion path.
             let store_for_outcome = msg_stores.read().await.get(&exec_id).cloned();
-            container
+            let decision = container
                 .record_claude_spawn_outcome(&exec_id, exit_code, store_for_outcome)
                 .await;
+
+            if let OutcomeDecision::Retry { backoff } = decision {
+                // Honor cancellation if the user kills the task while we
+                // sleep on backoff. Using tokio::time::sleep here per the
+                // spec's "Unix-style monotonic sleep, NOT scheduler" rule.
+                let cancel_token = container
+                    .cancellation_tokens
+                    .read()
+                    .await
+                    .get(&exec_id)
+                    .cloned();
+                let cancelled = if let Some(tok) = cancel_token {
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => false,
+                        _ = tok.cancelled() => true,
+                    }
+                } else {
+                    tokio::time::sleep(backoff).await;
+                    false
+                };
+
+                if !cancelled {
+                    match container.respawn_for_retry(&exec_id).await {
+                        Ok(()) => {
+                            // The respawn re-armed a fresh exit monitor; this
+                            // task is done. Do NOT call update_completion or
+                            // try_start_next_action — the new monitor owns
+                            // the lifecycle now.
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::error!(?e, %exec_id, "claude retry respawn failed; failing attempt");
+                            // Fall through to the normal completion path.
+                        }
+                    }
+                } else {
+                    tracing::info!(%exec_id, "claude retry cancelled during backoff");
+                    // Fall through; the cancel handler will mark the process
+                    // appropriately.
+                }
+            }
+
+            // Clear retry context on terminal exit so we don't leak state.
+            container.claude_retry_ctx.remove(&exec_id);
 
             if !ExecutionProcess::was_stopped(&db.pool, exec_id).await
                 && let Err(e) =
@@ -1575,6 +1726,27 @@ impl ContainerService for LocalContainerService {
             self.claude_spawn_dirs.insert(execution_process.id, tempdir);
             self.claude_spawn_accounts
                 .insert(execution_process.id, account_id);
+        }
+
+        // Seed (or update) the retry context for this execution_process so
+        // the exit monitor can decide whether to sleep+respawn or surface a
+        // hard failure. We do this for *every* spawn (initial + retry):
+        // initial spawn creates the entry, retry-respawn just updates it.
+        if matches!(
+            executor_action.base_executor(),
+            Some(BaseCodingAgent::ClaudeCode)
+        ) && self.claude_accounts.is_some()
+        {
+            let policy = self.config.read().await.claude_retry_policy;
+            self.claude_retry_ctx
+                .entry(execution_process.id)
+                .or_insert_with(|| ClaudeRetryCtx {
+                    workspace: workspace.clone(),
+                    executor_action: executor_action.clone(),
+                    policy,
+                    attempt_number: 1,
+                    accounts_tried: Vec::new(),
+                });
         }
 
         if let Err(e) = self
