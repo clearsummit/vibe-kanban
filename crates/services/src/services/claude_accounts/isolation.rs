@@ -14,8 +14,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-use super::oauth::OauthAccountInfo;
-use super::types::ClaudeOAuthCredentials;
+use super::{oauth::OauthAccountInfo, types::ClaudeOAuthCredentials};
 
 /// Owns a per-spawn credential directory under `<asset_dir>/claude_spawn_tmp/<uuid>/`.
 /// On drop, the directory is recursively removed.
@@ -69,10 +68,7 @@ impl Drop for TempCredentialDir {
     }
 }
 
-fn write_credentials_file(
-    dir: &Path,
-    creds: &ClaudeOAuthCredentials,
-) -> std::io::Result<()> {
+fn write_credentials_file(dir: &Path, creds: &ClaudeOAuthCredentials) -> std::io::Result<()> {
     let blob = json!({
         "claudeAiOauth": {
             "accessToken": creds.access_token,
@@ -84,10 +80,7 @@ fn write_credentials_file(
     write_secret_json(&dir.join(".credentials.json"), &blob)
 }
 
-fn write_claude_json(
-    dir: &Path,
-    oauth_account: Option<&OauthAccountInfo>,
-) -> std::io::Result<()> {
+fn write_claude_json(dir: &Path, oauth_account: Option<&OauthAccountInfo>) -> std::io::Result<()> {
     let oauth_block = match oauth_account {
         Some(acct) => json!({
             "uuid": acct.uuid,
@@ -158,8 +151,14 @@ mod tests {
         assert!(dir.path().join(".claude.json").exists());
 
         let env = dir.env_vars();
-        assert_eq!(env.get("CLAUDE_CONFIG_DIR").unwrap(), &dir.path().to_string_lossy().into_owned());
-        assert_eq!(env.get("HOME").unwrap(), &dir.path().to_string_lossy().into_owned());
+        assert_eq!(
+            env.get("CLAUDE_CONFIG_DIR").unwrap(),
+            &dir.path().to_string_lossy().into_owned()
+        );
+        assert_eq!(
+            env.get("HOME").unwrap(),
+            &dir.path().to_string_lossy().into_owned()
+        );
     }
 
     #[cfg(unix)]

@@ -11,10 +11,10 @@ use std::{sync::Arc, time::Duration};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::classifier::{fallback_reset, parse_usage_reset};
-use super::store::{ClaudeAccountsService, PickNextResult, StoreError};
-use super::types::{
-    ClaudeAccount, ClaudeAccountThrottleReason, ClaudeRetryPolicy, FailureClass,
+use super::{
+    classifier::{fallback_reset, parse_usage_reset},
+    store::{ClaudeAccountsService, PickNextResult, StoreError},
+    types::{ClaudeAccount, ClaudeAccountThrottleReason, ClaudeRetryPolicy, FailureClass},
 };
 
 #[derive(Debug, Clone)]
@@ -30,9 +30,7 @@ pub enum RotatorPick {
 #[derive(Debug, Clone)]
 pub enum RotatorDecision {
     /// Retry the same account after this back-off delay. Counts against retry budget.
-    RetrySame {
-        backoff: Duration,
-    },
+    RetrySame { backoff: Duration },
     /// Switch to the next healthy account. Counts against retry budget.
     RotateNext,
     /// Mark the account NeedsReauth and rotate. Does NOT count against retry budget.
@@ -97,8 +95,8 @@ impl Rotator {
             }
             FailureClass::UsageExhausted => {
                 let now = Utc::now();
-                let (reset_at, reason) = parse_usage_reset(combined_output, now)
-                    .unwrap_or_else(|| {
+                let (reset_at, reason) =
+                    parse_usage_reset(combined_output, now).unwrap_or_else(|| {
                         let reason = ClaudeAccountThrottleReason::FiveHour;
                         (fallback_reset(reason, now), reason)
                     });
@@ -146,14 +144,17 @@ fn truncate_for_log(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::services::claude_accounts::oauth::ClaudeOAuthClient;
-    use crate::services::claude_accounts::store::ClaudeAccountsStore;
-    use crate::services::claude_accounts::types::ClaudeOAuthCredentials;
     use chrono::Duration as ChronoDuration;
     use tempfile::TempDir;
 
-    async fn fresh_rotator(policy: ClaudeRetryPolicy) -> (TempDir, Arc<ClaudeAccountsService>, Rotator) {
+    use super::*;
+    use crate::services::claude_accounts::{
+        oauth::ClaudeOAuthClient, store::ClaudeAccountsStore, types::ClaudeOAuthCredentials,
+    };
+
+    async fn fresh_rotator(
+        policy: ClaudeRetryPolicy,
+    ) -> (TempDir, Arc<ClaudeAccountsService>, Rotator) {
         let tmp = TempDir::new().unwrap();
         let store = Arc::new(ClaudeAccountsStore::new(
             tmp.path().join("claude_accounts.json"),
@@ -233,8 +234,14 @@ mod tests {
         assert!(matches!(decision, RotatorDecision::RotateNext));
         let listed = svc.store.list_views().await;
         let row = listed.iter().find(|r| r.id == a.id).unwrap();
-        assert_eq!(row.status, super::super::types::ClaudeAccountStatus::Throttled);
-        assert_eq!(row.throttle_reason, Some(ClaudeAccountThrottleReason::FiveHour));
+        assert_eq!(
+            row.status,
+            super::super::types::ClaudeAccountStatus::Throttled
+        );
+        assert_eq!(
+            row.throttle_reason,
+            Some(ClaudeAccountThrottleReason::FiveHour)
+        );
     }
 
     #[tokio::test]

@@ -187,8 +187,7 @@ impl ClaudeRetryPolicy {
                 max: self.max_backoff_seconds,
             });
         }
-        if !self.backoff_multiplier.is_finite()
-            || !(1.0..=10.0).contains(&self.backoff_multiplier)
+        if !self.backoff_multiplier.is_finite() || !(1.0..=10.0).contains(&self.backoff_multiplier)
         {
             return Err(RetryPolicyValidationError::MultiplierOutOfRange(
                 self.backoff_multiplier,
@@ -202,8 +201,8 @@ impl ClaudeRetryPolicy {
     pub fn backoff_delay(&self, attempt: u32) -> Duration {
         let attempt = attempt.max(1);
         let exponent = (attempt - 1) as i32;
-        let raw = (self.initial_backoff_seconds as f64)
-            * (self.backoff_multiplier as f64).powi(exponent);
+        let raw =
+            (self.initial_backoff_seconds as f64) * (self.backoff_multiplier as f64).powi(exponent);
         let capped = raw.min(self.max_backoff_seconds as f64);
         Duration::from_secs(capped.round().max(0.0) as u64)
     }

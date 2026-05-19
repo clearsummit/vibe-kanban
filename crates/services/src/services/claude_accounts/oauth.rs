@@ -132,9 +132,7 @@ impl ClaudeOAuthClient {
         let now = Instant::now();
         let mut guard = self.pending.lock().expect("oauth state mutex");
         // GC expired entries opportunistically.
-        guard.retain(|_, entry| {
-            now.duration_since(entry.created_at).as_secs() < STATE_TTL_SECONDS
-        });
+        guard.retain(|_, entry| now.duration_since(entry.created_at).as_secs() < STATE_TTL_SECONDS);
         guard.insert(
             state.clone(),
             PendingOAuthState {
@@ -153,8 +151,14 @@ impl ClaudeOAuthClient {
         &self,
         state: &str,
         code: &str,
-    ) -> Result<(ClaudeOAuthCredentials, Option<OauthAccountInfo>, Option<Uuid>), ClaudeOAuthError>
-    {
+    ) -> Result<
+        (
+            ClaudeOAuthCredentials,
+            Option<OauthAccountInfo>,
+            Option<Uuid>,
+        ),
+        ClaudeOAuthError,
+    > {
         let pending = {
             let mut guard = self.pending.lock().expect("oauth state mutex");
             guard.remove(state).ok_or(ClaudeOAuthError::UnknownState)?
@@ -266,8 +270,7 @@ fn generate_pkce_pair() -> (String, String) {
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
     (verifier, challenge)
 }
 
@@ -285,7 +288,10 @@ mod tests {
     fn start_returns_url_with_required_query_params() {
         let client = ClaudeOAuthClient::new();
         let resp = client.start(None);
-        assert!(resp.auth_url.starts_with("https://claude.ai/oauth/authorize?"));
+        assert!(
+            resp.auth_url
+                .starts_with("https://claude.ai/oauth/authorize?")
+        );
         assert!(resp.auth_url.contains("response_type=code"));
         assert!(resp.auth_url.contains(&format!("client_id={CLIENT_ID}")));
         assert!(resp.auth_url.contains("code_challenge_method=S256"));
@@ -297,8 +303,7 @@ mod tests {
         let (verifier, challenge) = generate_pkce_pair();
         let mut hasher = Sha256::new();
         hasher.update(verifier.as_bytes());
-        let recomputed =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+        let recomputed = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
         assert_eq!(challenge, recomputed);
     }
 

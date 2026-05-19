@@ -100,6 +100,12 @@ import {
   OpenRemoteWorkspaceInEditorRequest,
   OpenRemoteEditorResponse,
   ProfileResponse,
+  ClaudeAccountView,
+  ClaudeRetryPolicy,
+  ClaudeOAuthStartRequest,
+  ClaudeOAuthStartResponse,
+  ClaudeOAuthCompleteRequest,
+  UpdateClaudeAccount,
 } from 'shared/types';
 import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
@@ -1697,5 +1703,68 @@ export const searchApi = {
       options
     );
     return handleApiResponse<SearchResult[]>(response);
+  },
+};
+
+// Multi-account Claude OAuth + retry policy.
+export const claudeAccountsApi = {
+  list: async (): Promise<ClaudeAccountView[]> => {
+    const response = await makeRequest('/api/claude-accounts');
+    return handleApiResponse<ClaudeAccountView[]>(response);
+  },
+
+  startOAuth: async (
+    data?: ClaudeOAuthStartRequest
+  ): Promise<ClaudeOAuthStartResponse> => {
+    const response = await makeRequest('/api/claude-accounts/oauth/start', {
+      method: 'POST',
+      body: JSON.stringify(data ?? { account_id: null }),
+    });
+    return handleApiResponse<ClaudeOAuthStartResponse>(response);
+  },
+
+  completeOAuth: async (
+    data: ClaudeOAuthCompleteRequest
+  ): Promise<ClaudeAccountView> => {
+    const response = await makeRequest('/api/claude-accounts/oauth/complete', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<ClaudeAccountView>(response);
+  },
+
+  update: async (
+    id: string,
+    data: UpdateClaudeAccount
+  ): Promise<ClaudeAccountView> => {
+    const response = await makeRequest(`/api/claude-accounts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<ClaudeAccountView>(response);
+  },
+
+  remove: async (id: string): Promise<void> => {
+    const response = await makeRequest(`/api/claude-accounts/${id}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok && response.status !== 204) {
+      throw new Error(`Failed to remove account: ${response.statusText}`);
+    }
+  },
+
+  getRetryPolicy: async (): Promise<ClaudeRetryPolicy> => {
+    const response = await makeRequest('/api/claude-accounts/retry-policy');
+    return handleApiResponse<ClaudeRetryPolicy>(response);
+  },
+
+  putRetryPolicy: async (
+    policy: ClaudeRetryPolicy
+  ): Promise<ClaudeRetryPolicy> => {
+    const response = await makeRequest('/api/claude-accounts/retry-policy', {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+    });
+    return handleApiResponse<ClaudeRetryPolicy>(response);
   },
 };

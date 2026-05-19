@@ -15,10 +15,12 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use uuid::Uuid;
 
-use super::oauth::{ClaudeOAuthClient, ClaudeOAuthError, OauthAccountInfo};
-use super::types::{
-    ClaudeAccount, ClaudeAccountLastError, ClaudeAccountStatus, ClaudeAccountThrottleReason,
-    ClaudeAccountUsageWindow, ClaudeAccountView, ClaudeOAuthCredentials, FailureClass,
+use super::{
+    oauth::{ClaudeOAuthClient, ClaudeOAuthError, OauthAccountInfo},
+    types::{
+        ClaudeAccount, ClaudeAccountLastError, ClaudeAccountStatus, ClaudeAccountThrottleReason,
+        ClaudeAccountUsageWindow, ClaudeAccountView, ClaudeOAuthCredentials, FailureClass,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -267,10 +269,7 @@ impl ClaudeAccountsStore {
     /// Round-robin select the next non-throttled, non-disabled, non-needs-reauth
     /// account, skipping any in `exclude`. Returns the soonest `throttled_until`
     /// if no healthy account remains.
-    pub async fn pick_next(
-        &self,
-        exclude: &[Uuid],
-    ) -> PickNextResult {
+    pub async fn pick_next(&self, exclude: &[Uuid]) -> PickNextResult {
         let mut guard = self.accounts.write().await;
         self.unthrottle_expired_locked(&mut guard).await;
         if guard.is_empty() {
@@ -438,9 +437,10 @@ impl ClaudeAccountsService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Duration as ChronoDuration;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn fake_creds(expires_in: i64) -> ClaudeOAuthCredentials {
         ClaudeOAuthCredentials {

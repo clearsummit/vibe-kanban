@@ -7,9 +7,7 @@ pub use v7::{
     ThemeMode, UiLanguage,
 };
 
-use crate::services::{
-    claude_accounts::types::ClaudeRetryPolicy, config::versions::v7,
-};
+use crate::services::{claude_accounts::types::ClaudeRetryPolicy, config::versions::v7};
 
 fn default_git_branch_prefix() -> String {
     "vk".to_string()

@@ -81,12 +81,7 @@ async fn patch_account(
         view = Some(store.update_label(id, label).await.map_err(store_err)?);
     }
     if let Some(disabled) = payload.disabled {
-        view = Some(
-            store
-                .set_disabled(id, disabled)
-                .await
-                .map_err(store_err)?,
-        );
+        view = Some(store.set_disabled(id, disabled).await.map_err(store_err)?);
     }
     let view = match view {
         Some(v) => v,
@@ -132,8 +127,7 @@ async fn put_retry_policy(
         cfg.claude_retry_policy = policy;
     }
     let cfg = deployment.config().read().await.clone();
-    services::services::config::save_config_to_file(&cfg, &utils::assets::config_path())
-        .await?;
+    services::services::config::save_config_to_file(&cfg, &utils::assets::config_path()).await?;
     Ok(ResponseJson(ApiResponse::success(policy)))
 }
 
@@ -155,6 +149,9 @@ pub fn router() -> Router<DeploymentImpl> {
             .route("/oauth/start", post(oauth_start))
             .route("/oauth/complete", post(oauth_complete))
             .route("/retry-policy", get(get_retry_policy).put(put_retry_policy))
-            .route("/{id}", axum::routing::patch(patch_account).delete(delete_account)),
+            .route(
+                "/{id}",
+                axum::routing::patch(patch_account).delete(delete_account),
+            ),
     )
 }

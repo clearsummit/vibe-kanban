@@ -54,11 +54,7 @@ static TRANSIENT_RE: Lazy<Regex> = Lazy::new(|| {
 /// `-p` non-interactive mode). Do NOT include user-supplied prompts or model
 /// assistant content — a prompt containing the phrase "rate limit" must not
 /// trigger rotation.
-pub fn classify_failure(
-    stdout: &str,
-    stderr: &str,
-    exit_code: Option<i32>,
-) -> FailureClass {
+pub fn classify_failure(stdout: &str, stderr: &str, exit_code: Option<i32>) -> FailureClass {
     let combined = if stdout.is_empty() {
         stderr.to_string()
     } else if stderr.is_empty() {
@@ -111,10 +107,7 @@ pub fn parse_usage_reset(
 
 /// Conservative fallback reset times when the CLI doesn't surface a structured
 /// timestamp (per spec FR-017 / edge case "Unknown usage window").
-pub fn fallback_reset(
-    reason: ClaudeAccountThrottleReason,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
+pub fn fallback_reset(reason: ClaudeAccountThrottleReason, now: DateTime<Utc>) -> DateTime<Utc> {
     match reason {
         ClaudeAccountThrottleReason::FiveHour => now + ChronoDuration::hours(1),
         ClaudeAccountThrottleReason::Weekly => {

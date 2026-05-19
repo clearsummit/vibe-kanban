@@ -25,6 +25,8 @@
         "reposDesc": "Repository scripts and configuration",
         "agents": "Agents",
         "agentsDesc": "Coding agent configurations",
+        "claude-accounts": "Claude Accounts",
+        "claude-accountsDesc": "Multi-account OAuth + retry policy",
         "mcp": "MCP Servers",
         "mcpDesc": "Model Context Protocol servers",
         "organizations": "Organization Settings",
