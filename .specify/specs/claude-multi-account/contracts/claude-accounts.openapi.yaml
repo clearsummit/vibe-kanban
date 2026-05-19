@@ -1,0 +1,232 @@
+openapi: 3.1.0
+info:
+  title: Vibe Kanban — Claude Accounts API
+  version: 0.1.0
+  description: |
+    Local-only HTTP API for managing enrolled Claude OAuth accounts. All routes
+    are nested under the existing `/api` prefix and protected by the existing
+    relay-request-signature middleware. Credentials are NEVER returned in
+    responses; only the redacted `ClaudeAccountView` shape.
+
+servers:
+  - url: http://127.0.0.1:{port}/api
+    variables:
+      port:
+        default: "5173"
+
+components:
+  schemas:
+    ClaudeAccountStatus:
+      type: string
+      enum: [active, throttled, needs_reauth, disabled]
+
+    ClaudeAccountThrottleReason:
+      type: string
+      enum: [five_hour, weekly]
+
+    FailureClass:
+      type: string
+      enum: [transient, usage_exhausted, needs_reauth, fatal]
+
+    ClaudeAccountUsageWindow:
+      type: object
+      required: [used]
+      properties:
+        used:
+          type: integer
+          minimum: 0
+        reset_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ClaudeAccountLastError:
+      type: object
+      required: [message, classification, occurred_at]
+      properties:
+        message: { type: string }
+        classification: { $ref: '#/components/schemas/FailureClass' }
+        occurred_at:
+          type: string
+          format: date-time
+
+    ClaudeAccountView:
+      type: object
+      required:
+        [id, label, created_at, status, five_hour_window, weekly_window]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        email: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        status: { $ref: '#/components/schemas/ClaudeAccountStatus' }
+        throttled_until: { type: string, format: date-time, nullable: true }
+        throttle_reason:
+          oneOf:
+            - $ref: '#/components/schemas/ClaudeAccountThrottleReason'
+            - type: 'null'
+        five_hour_window:
+          { $ref: '#/components/schemas/ClaudeAccountUsageWindow' }
+        weekly_window:
+          { $ref: '#/components/schemas/ClaudeAccountUsageWindow' }
+        last_error:
+          oneOf:
+            - $ref: '#/components/schemas/ClaudeAccountLastError'
+            - type: 'null'
+
+    ClaudeOAuthStartRequest:
+      type: object
+      properties:
+        account_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            If set, this is a re-auth for the existing account; the OAuth
+            completion will replace credentials in place (preserving id,
+            label, and usage history). If null, a new account will be enrolled
+            on completion.
+
+    ClaudeOAuthStartResponse:
+      type: object
+      required: [auth_url, state]
+      properties:
+        auth_url: { type: string, format: uri }
+        state:
+          type: string
+          description: |
+            Opaque token. Pass back unchanged in `/oauth/complete`.
+
+    ClaudeOAuthCompleteRequest:
+      type: object
+      required: [state, code]
+      properties:
+        state: { type: string }
+        code: { type: string }
+
+    UpdateClaudeAccount:
+      type: object
+      properties:
+        label: { type: string }
+        disabled: { type: boolean }
+
+    ApiError:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        code: { type: string }
+
+paths:
+  /claude-accounts:
+    get:
+      summary: List enrolled Claude accounts
+      operationId: listClaudeAccounts
+      responses:
+        '200':
+          description: List of redacted account views (newest-first).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ClaudeAccountView' }
+
+  /claude-accounts/oauth/start:
+    post:
+      summary: Begin a Claude OAuth (PKCE) flow
+      operationId: startClaudeOAuth
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaudeOAuthStartRequest' }
+      responses:
+        '200':
+          description: Authorization URL and state token to round-trip.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    { $ref: '#/components/schemas/ClaudeOAuthStartResponse' }
+
+  /claude-accounts/oauth/complete:
+    post:
+      summary: Exchange an authorization code for tokens and enroll the account
+      operationId: completeClaudeOAuth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaudeOAuthCompleteRequest' }
+      responses:
+        '200':
+          description: The newly enrolled (or re-authenticated) account.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ClaudeAccountView' }
+        '400':
+          description: |
+            Returned for: unknown `state`, expired `state` (>10m), code
+            exchange failure at the Anthropic token endpoint.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+
+  /claude-accounts/{id}:
+    patch:
+      summary: Update an account (rename, disable, enable)
+      operationId: patchClaudeAccount
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateClaudeAccount' }
+      responses:
+        '200':
+          description: Updated account view.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ClaudeAccountView' }
+        '404':
+          description: Account not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+
+    delete:
+      summary: Remove an enrolled account
+      operationId: deleteClaudeAccount
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Deleted.
+        '404':
+          description: Account not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }

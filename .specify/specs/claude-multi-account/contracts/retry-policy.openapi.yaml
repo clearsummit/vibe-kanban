@@ -1,0 +1,100 @@
+openapi: 3.1.0
+info:
+  title: Vibe Kanban — Claude Retry Policy API
+  version: 0.1.0
+  description: |
+    Local-only HTTP API for reading and updating the Claude executor retry
+    policy. Lives alongside the Claude accounts routes; persisted in the
+    existing `config.json` so changes flow through the same save path as
+    other settings.
+
+servers:
+  - url: http://127.0.0.1:{port}/api
+    variables:
+      port:
+        default: "5173"
+
+components:
+  schemas:
+    ClaudeRetryPolicy:
+      type: object
+      required:
+        - max_attempts
+        - initial_backoff_seconds
+        - backoff_multiplier
+        - max_backoff_seconds
+      properties:
+        max_attempts:
+          type: integer
+          minimum: 0
+          description: |
+            Maximum retry attempts per task attempt. `0` disables retry; the
+            first failure surfaces as a hard task failure.
+          default: 6
+        initial_backoff_seconds:
+          type: integer
+          minimum: 1
+          maximum: 600
+          default: 30
+        backoff_multiplier:
+          type: number
+          minimum: 1.0
+          maximum: 10.0
+          default: 2.0
+        max_backoff_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          default: 300
+
+    ApiError:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        code: { type: string }
+
+paths:
+  /claude-accounts/retry-policy:
+    get:
+      summary: Read the current Claude retry policy
+      operationId: getClaudeRetryPolicy
+      responses:
+        '200':
+          description: The currently persisted retry policy.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ClaudeRetryPolicy' }
+
+    put:
+      summary: Replace the Claude retry policy
+      operationId: putClaudeRetryPolicy
+      description: |
+        Replaces the entire policy. Applies live — the next task attempt
+        spawned after this call sees the new values without a restart.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaudeRetryPolicy' }
+      responses:
+        '200':
+          description: The persisted policy after the update.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ClaudeRetryPolicy' }
+        '400':
+          description: |
+            Validation failure: a field is out of allowed range, or
+            max_backoff_seconds < initial_backoff_seconds.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
