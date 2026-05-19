@@ -8,6 +8,7 @@
 pub mod classifier;
 pub mod isolation;
 pub mod oauth;
+pub mod retry_state;
 pub mod rotator;
 pub mod store;
 pub mod types;
@@ -15,6 +16,7 @@ pub mod types;
 pub use classifier::{classify_failure, parse_usage_reset};
 pub use isolation::TempCredentialDir;
 pub use oauth::{ClaudeOAuthClient, OauthAccountInfo, PendingOAuthState};
+pub use retry_state::ClaudeRetryState;
 pub use rotator::{Rotator, RotatorDecision, RotatorPick};
 pub use store::{ClaudeAccountsService, ClaudeAccountsStore};
 pub use types::{

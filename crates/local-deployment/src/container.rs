@@ -44,8 +44,8 @@ use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
     claude_accounts::{
-        ClaudeAccountsService, Rotator, RotatorDecision, TempCredentialDir, classify_failure,
-        types::ClaudeRetryPolicy,
+        ClaudeAccountsService, ClaudeRetryState, Rotator, RotatorDecision, TempCredentialDir,
+        classify_failure, types::ClaudeRetryPolicy,
     },
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
@@ -637,8 +637,11 @@ impl LocalContainerService {
             if let Err(e) = svc.record_success(account_id).await {
                 tracing::warn!(?e, %account_id, "failed to record claude account success");
             }
-            // Done with this attempt: clear retry context.
+            // Done with this attempt: clear retry context + persisted file.
             self.claude_retry_ctx.remove(exec_id);
+            if let Err(e) = ClaudeRetryState::delete(*exec_id).await {
+                tracing::warn!(?e, %exec_id, "failed to delete claude retry-state file after success");
+            }
             return OutcomeDecision::Continue;
         }
 
@@ -751,6 +754,111 @@ impl LocalContainerService {
             .await
     }
 
+    /// Resume any Claude retries that were sleeping on back-off when the app
+    /// was last shut down. Reads every `claude_retry_state/*.json` file,
+    /// verifies the corresponding `execution_process` is still `Running`,
+    /// re-hydrates the in-memory retry context from the DB, sleeps the
+    /// remaining back-off, and respawns. Spec FR-022 + FR-023 + SC-010.
+    ///
+    /// Called once from `LocalDeployment::new` after the container service
+    /// and db are wired up.
+    pub async fn resume_pending_claude_retries(&self) {
+        let states = ClaudeRetryState::list_all().await;
+        if states.is_empty() {
+            return;
+        }
+        tracing::info!(count = states.len(), "resuming pending claude retries");
+
+        for state in states {
+            let exec_id = state.execution_process_id;
+
+            // Reload execution_process row. If it's gone or already in a
+            // terminal status, drop the orphaned retry-state file.
+            let process = match ExecutionProcess::find_by_id(&self.db.pool, exec_id).await {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    tracing::warn!(%exec_id, "retry-state references missing execution_process; dropping");
+                    let _ = ClaudeRetryState::delete(exec_id).await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(?e, %exec_id, "db error during retry resume");
+                    continue;
+                }
+            };
+            if !matches!(process.status, ExecutionProcessStatus::Running) {
+                tracing::info!(%exec_id, status = ?process.status, "retry-state references non-Running process; dropping");
+                let _ = ClaudeRetryState::delete(exec_id).await;
+                continue;
+            }
+
+            // Re-derive workspace + executor_action via the DB.
+            let exec_ctx = match ExecutionProcess::load_context(&self.db.pool, exec_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(?e, %exec_id, "failed to load context for retry resume");
+                    continue;
+                }
+            };
+            let executor_action = match process.executor_action() {
+                Ok(action) => action.clone(),
+                Err(e) => {
+                    tracing::error!(?e, %exec_id, "execution_process has non-ExecutorAction payload; dropping retry");
+                    let _ = ClaudeRetryState::delete(exec_id).await;
+                    continue;
+                }
+            };
+
+            // Seed the in-memory retry context from the persisted state so
+            // the next failure picks up at the right attempt number.
+            let policy = self.config.read().await.claude_retry_policy;
+            self.claude_retry_ctx.insert(
+                exec_id,
+                ClaudeRetryCtx {
+                    workspace: exec_ctx.workspace.clone(),
+                    executor_action: executor_action.clone(),
+                    policy,
+                    attempt_number: state.attempt_number,
+                    accounts_tried: state.accounts_tried.clone(),
+                },
+            );
+
+            // Compute how long is left on the original sleep. Clamp the
+            // delay to a sane upper bound (the policy's cap) so we don't
+            // sleep for hours on a stale state file with a 5h reset time.
+            let now = chrono::Utc::now();
+            let remaining = (state.scheduled_resume_at - now).num_seconds().max(1) as u64;
+            let capped = remaining.min(policy.max_backoff_seconds as u64);
+            let delay = Duration::from_secs(capped);
+
+            tracing::info!(
+                %exec_id,
+                attempt = state.attempt_number,
+                delay_s = capped,
+                "claude retry resume: scheduling respawn"
+            );
+
+            let container = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Err(e) = container.respawn_for_retry(&exec_id).await {
+                    tracing::error!(?e, %exec_id, "claude retry resume failed");
+                    // Clean up so the user isn't stuck with a permanently-
+                    // Running ExecutionProcess.
+                    let _ = ExecutionProcess::update_completion(
+                        &container.db.pool,
+                        exec_id,
+                        ExecutionProcessStatus::Failed,
+                        None,
+                    )
+                    .await;
+                    let _ = ClaudeRetryState::delete(exec_id).await;
+                    container.claude_retry_ctx.remove(&exec_id);
+                }
+            });
+        }
+    }
+
     fn spawn_exit_monitor(
         &self,
         exec_id: &Uuid,
@@ -824,6 +932,32 @@ impl LocalContainerService {
                 .await;
 
             if let OutcomeDecision::Retry { backoff } = decision {
+                // Persist enough state to resume across an application
+                // restart (FR-023). The on-disk record is the source of
+                // truth for "this attempt has a pending retry"; the
+                // in-memory claude_retry_ctx is just an optimization.
+                if let Some(ctx) = container.claude_retry_ctx.get(&exec_id).map(|e| e.clone()) {
+                    let now = chrono::Utc::now();
+                    let resume_at = now
+                        + chrono::Duration::from_std(backoff).unwrap_or_else(|_| {
+                            chrono::Duration::seconds(backoff.as_secs() as i64)
+                        });
+                    let persisted = ClaudeRetryState {
+                        execution_process_id: exec_id,
+                        attempt_number: ctx.attempt_number,
+                        accounts_tried: ctx.accounts_tried.clone(),
+                        scheduled_resume_at: resume_at,
+                        updated_at: now,
+                    };
+                    if let Err(e) = persisted.save().await {
+                        tracing::warn!(
+                            ?e,
+                            %exec_id,
+                            "failed to persist claude retry state; restart resume will be unavailable for this attempt"
+                        );
+                    }
+                }
+
                 // Honor cancellation if the user kills the task while we
                 // sleep on backoff. Using tokio::time::sleep here per the
                 // spec's "Unix-style monotonic sleep, NOT scheduler" rule.
@@ -849,7 +983,9 @@ impl LocalContainerService {
                             // The respawn re-armed a fresh exit monitor; this
                             // task is done. Do NOT call update_completion or
                             // try_start_next_action — the new monitor owns
-                            // the lifecycle now.
+                            // the lifecycle now. The persisted retry-state
+                            // file stays until the next outcome (success or
+                            // hard fail) deletes it.
                             return;
                         }
                         Err(e) => {
@@ -864,8 +1000,13 @@ impl LocalContainerService {
                 }
             }
 
-            // Clear retry context on terminal exit so we don't leak state.
+            // Terminal exit: clear in-memory retry context AND the persisted
+            // retry-state file so a future restart doesn't try to resume a
+            // completed attempt.
             container.claude_retry_ctx.remove(&exec_id);
+            if let Err(e) = ClaudeRetryState::delete(exec_id).await {
+                tracing::warn!(?e, %exec_id, "failed to delete claude retry-state file on terminal exit");
+            }
 
             if !ExecutionProcess::was_stopped(&db.pool, exec_id).await
                 && let Err(e) =

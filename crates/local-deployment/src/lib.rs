@@ -257,6 +257,16 @@ impl Deployment for LocalDeployment {
         )
         .await;
 
+        // Resume any Claude retries that were sleeping on back-off when we
+        // last shut down (spec FR-022 + FR-023 + SC-010). Runs in the
+        // background so it doesn't block startup.
+        {
+            let container = container.clone();
+            tokio::spawn(async move {
+                container.resume_pending_claude_retries().await;
+            });
+        }
+
         let events = EventService::new(db.clone(), events_msg_store, events_entry_count);
 
         let file_search_cache = Arc::new(FileSearchCache::new());
