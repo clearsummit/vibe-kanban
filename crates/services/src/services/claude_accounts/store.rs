@@ -483,11 +483,18 @@ impl ClaudeAccountsService {
     }
 
     pub async fn refresh_lock(&self, id: Uuid) -> OwnedMutexGuard<()> {
-        let entry = self
-            .refresh_locks
-            .entry(id)
-            .or_insert_with(|| Arc::new(Mutex::new(())));
-        entry.value().clone().lock_owned().await
+        // Clone the Arc out of the DashMap entry FIRST, then drop the entry
+        // guard before awaiting the mutex. DashMap entry guards hold a
+        // shard lock; awaiting while it's held blocks other map operations
+        // and can deadlock under contention.
+        let mutex = {
+            let entry = self
+                .refresh_locks
+                .entry(id)
+                .or_insert_with(|| Arc::new(Mutex::new(())));
+            entry.value().clone()
+        };
+        mutex.lock_owned().await
     }
 
     /// Returns a valid credential bundle for the given account, refreshing if

@@ -12,6 +12,13 @@ import {
 } from '@phosphor-icons/react';
 import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
 import { ConfirmDialog } from '@vibe/ui/components/ConfirmDialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@vibe/ui/components/Dialog';
 import { claudeAccountsApi } from '@/shared/lib/api';
 import type {
   ClaudeAccountStatus,
@@ -34,20 +41,23 @@ interface AddAccountState {
   accountId: string | null; // when set, this is a re-auth in place
 }
 
-function describeStatus(s: ClaudeAccountStatus): {
-  label: string;
-  color: string;
-} {
+function statusColor(s: ClaudeAccountStatus): string {
   switch (s) {
     case 'active':
-      return { label: 'Active', color: 'text-emerald-500' };
+      return 'text-emerald-500';
     case 'throttled':
-      return { label: 'Throttled', color: 'text-amber-500' };
+      return 'text-amber-500';
     case 'needs_reauth':
-      return { label: 'Needs re-auth', color: 'text-red-500' };
+      return 'text-red-500';
     case 'disabled':
-      return { label: 'Disabled', color: 'text-low' };
+      return 'text-low';
   }
+}
+
+/** Localized status label. Hook needs to be called from a component. */
+function useStatusLabel(s: ClaudeAccountStatus): string {
+  const { t } = useTranslation('settings');
+  return t(`settings.claude-accounts.status.${s}`);
 }
 
 function formatLocal(ts: string | null | undefined): string {
@@ -469,7 +479,8 @@ function AccountRow({
   onReauth: () => void;
 }) {
   const { t } = useTranslation('settings');
-  const status = describeStatus(account.status);
+  const statusLabel = useStatusLabel(account.status);
+  const statusColorCls = statusColor(account.status);
   const fiveHourCountdown = useCountdown(account.five_hour_window.reset_at);
   const weeklyCountdown = useCountdown(account.weekly_window.reset_at);
   const throttleCountdown = useCountdown(account.throttled_until);
@@ -550,14 +561,16 @@ function AccountRow({
           </button>
         )}
       </td>
-      <td className={`py-3 pr-3 ${status.color}`}>
-        {status.label}
+      <td className={`py-3 pr-3 ${statusColorCls}`}>
+        {statusLabel}
         {account.status === 'throttled' && throttleCountdown && (
           <div className="text-xs text-low">
-            resets in {throttleCountdown}
+            {t('settings.claude-accounts.status.throttledCountdown', {
+              remaining: throttleCountdown,
+            })}{' '}
             {account.throttle_reason === 'weekly'
-              ? ' (weekly cap)'
-              : ' (5h cap)'}
+              ? `(${t('settings.claude-accounts.status.throttledWeeklyCap')})`
+              : `(${t('settings.claude-accounts.status.throttledFiveHourCap')})`}
           </div>
         )}
       </td>
@@ -618,19 +631,33 @@ function AddAccountModal({
   onSubmit: () => void;
   onCancel: () => void;
 }) {
-  const heading = state.accountId
-    ? 'Re-authorize account'
-    : 'Add Claude account';
+  const { t } = useTranslation('settings');
+  const title = state.accountId
+    ? t('settings.claude-accounts.addModal.reauthTitle')
+    : t('settings.claude-accounts.addModal.title');
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-panel border border-border rounded-md w-full max-w-md p-5 space-y-4">
-        <div className="flex items-center gap-2">
-          <KeyIcon />
-          <h3 className="font-semibold text-high">{heading}</h3>
-        </div>
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        // Radix invokes onOpenChange with `false` for Escape, outside-click,
+        // and explicit close. Cancel the modal in all of those cases. Radix
+        // also stops Escape from bubbling to the parent SettingsDialog, so
+        // hitting Escape no longer closes the entire Settings dialog.
+        if (!open) onCancel();
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <KeyIcon /> {title}
+          </DialogTitle>
+          <DialogDescription>
+            {t('settings.claude-accounts.addModal.description')}
+          </DialogDescription>
+        </DialogHeader>
         <ol className="text-sm text-normal space-y-2 list-decimal pl-5">
           <li>
-            Click the button below to open claude.ai and sign in.
+            {t('settings.claude-accounts.addModal.step1')}
             <div className="mt-1">
               <a
                 href={state.authUrl}
@@ -638,22 +665,26 @@ function AddAccountModal({
                 rel="noreferrer"
                 className="inline-flex items-center gap-1 text-brand underline text-sm"
               >
-                Open claude.ai <ArrowSquareOutIcon />
+                {t('settings.claude-accounts.addModal.openClaude')}{' '}
+                <ArrowSquareOutIcon />
               </a>
             </div>
           </li>
-          <li>Authorize Vibe Kanban; claude.ai will display a code.</li>
-          <li>Paste the code here and click Complete.</li>
+          <li>{t('settings.claude-accounts.addModal.step2')}</li>
+          <li>{t('settings.claude-accounts.addModal.step3')}</li>
         </ol>
         <div>
           <label className="text-xs text-low block mb-1">
-            Code from claude.ai
+            {t('settings.claude-accounts.addModal.codeLabel')}
           </label>
           <input
             value={state.code}
             onChange={(e) => onCodeChange(e.target.value)}
-            placeholder="paste-the-code-here"
+            placeholder={t(
+              'settings.claude-accounts.addModal.codePlaceholder'
+            )}
             className="w-full bg-secondary/30 border border-border rounded px-2 py-1 text-sm font-mono"
+            autoFocus
           />
         </div>
         {state.error && (
@@ -667,17 +698,17 @@ function AddAccountModal({
             onClick={onCancel}
             className="text-sm text-low hover:text-normal px-3 py-1.5"
           >
-            Cancel
+            {t('settings.claude-accounts.addModal.cancel')}
           </button>
           <PrimaryButton
             onClick={onSubmit}
             disabled={!state.code.trim() || state.exchanging}
           >
             {state.exchanging && <SpinnerIcon className="animate-spin" />}
-            Complete enrollment
+            {t('settings.claude-accounts.addModal.complete')}
           </PrimaryButton>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

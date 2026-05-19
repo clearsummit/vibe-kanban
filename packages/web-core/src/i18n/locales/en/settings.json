@@ -385,6 +385,15 @@
         "moveUp": "Move up in rotation order",
         "moveDown": "Move down in rotation order"
       },
+      "status": {
+        "active": "Active",
+        "throttled": "Throttled",
+        "needs_reauth": "Needs re-auth",
+        "disabled": "Disabled",
+        "throttledCountdown": "resets in {{remaining}}",
+        "throttledWeeklyCap": "weekly cap",
+        "throttledFiveHourCap": "5h cap"
+      },
       "retryPolicy": {
         "title": "Retry policy",
         "description": "When Claude returns a transient error (400/5xx/network), Vibe Kanban retries the same account with exponential back-off. When an account hits its 5-hour or weekly cap, Vibe Kanban rotates to the next healthy account. Set max_attempts to 0 to disable retry entirely.",
@@ -402,6 +411,19 @@
         "title": "Remove account?",
         "message": "Locally stored credentials for \"{{label}}\" will be deleted. You can re-enroll later by signing in again.",
         "confirm": "Remove"
+      },
+      "addModal": {
+        "title": "Add Claude account",
+        "reauthTitle": "Re-authorize account",
+        "description": "Open claude.ai to authorize, paste the returned code, and click Complete.",
+        "step1": "Click the button below to open claude.ai and sign in.",
+        "openClaude": "Open claude.ai",
+        "step2": "Authorize Vibe Kanban; claude.ai will display a code.",
+        "step3": "Paste the code here and click Complete.",
+        "codeLabel": "Code from claude.ai",
+        "codePlaceholder": "paste-the-code-here",
+        "cancel": "Cancel",
+        "complete": "Complete enrollment"
       }
     },
     "mcp": {
