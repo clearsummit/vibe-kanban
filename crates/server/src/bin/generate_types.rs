@@ -268,6 +268,19 @@ fn generate_types_content() -> String {
         relay_webrtc::WsError::decl(),
         relay_webrtc::SdpOffer::decl(),
         relay_webrtc::SdpAnswer::decl(),
+        services::services::claude_accounts::types::ClaudeAccount::decl(),
+        services::services::claude_accounts::types::ClaudeAccountView::decl(),
+        services::services::claude_accounts::types::ClaudeAccountStatus::decl(),
+        services::services::claude_accounts::types::ClaudeAccountThrottleReason::decl(),
+        services::services::claude_accounts::types::ClaudeAccountUsageWindow::decl(),
+        services::services::claude_accounts::types::ClaudeAccountLastError::decl(),
+        services::services::claude_accounts::types::FailureClass::decl(),
+        services::services::claude_accounts::types::ClaudeRetryPolicy::decl(),
+        services::services::claude_accounts::types::TaskAttemptRetryState::decl(),
+        services::services::claude_accounts::oauth::ClaudeOAuthStartRequest::decl(),
+        services::services::claude_accounts::oauth::ClaudeOAuthStartResponse::decl(),
+        services::services::claude_accounts::oauth::ClaudeOAuthCompleteRequest::decl(),
+        server::routes::claude_accounts::UpdateClaudeAccount::decl(),
     ];
 
     let body = decls

@@ -7,7 +7,9 @@ pub use v7::{
     ThemeMode, UiLanguage,
 };
 
-use crate::services::config::versions::v7;
+use crate::services::{
+    claude_accounts::types::ClaudeRetryPolicy, config::versions::v7,
+};
 
 fn default_git_branch_prefix() -> String {
     "vk".to_string()
@@ -68,6 +70,8 @@ pub struct Config {
     pub relay_enabled: bool,
     #[serde(default)]
     pub host_nickname: Option<String>,
+    #[serde(default)]
+    pub claude_retry_policy: ClaudeRetryPolicy,
 }
 
 impl Config {
@@ -99,6 +103,7 @@ impl Config {
             send_message_shortcut: SendMessageShortcut::default(),
             relay_enabled: true,
             host_nickname: None,
+            claude_retry_policy: ClaudeRetryPolicy::default(),
         }
     }
 
@@ -155,6 +160,7 @@ impl Default for Config {
             send_message_shortcut: SendMessageShortcut::default(),
             relay_enabled: true,
             host_nickname: None,
+            claude_retry_policy: ClaudeRetryPolicy::default(),
         }
     }
 }

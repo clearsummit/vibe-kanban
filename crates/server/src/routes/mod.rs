@@ -7,6 +7,7 @@ use tower_http::{compression::CompressionLayer, validate_request::ValidateReques
 use crate::{DeploymentImpl, middleware};
 
 pub mod approvals;
+pub mod claude_accounts;
 pub mod config;
 pub mod containers;
 pub mod filesystem;
@@ -42,6 +43,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(execution_processes::router(&deployment))
         .merge(tags::router(&deployment))
         .merge(oauth::router())
+        .merge(claude_accounts::router())
         .merge(organizations::router())
         .merge(filesystem::router())
         .merge(repo::router())
