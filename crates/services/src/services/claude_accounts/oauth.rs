@@ -107,9 +107,18 @@ impl Default for ClaudeOAuthClient {
 
 impl ClaudeOAuthClient {
     pub fn new() -> Self {
+        // Bound the OAuth network calls so a stalled Anthropic endpoint
+        // produces a real error rather than hanging the enrollment flow
+        // forever. Matches the conservative defaults used elsewhere
+        // (analytics, releases) — 10s to connect, 30s total.
+        let http = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("reqwest client builds with valid defaults");
         Self {
             pending: Mutex::new(HashMap::new()),
-            http: Client::new(),
+            http,
         }
     }
 
@@ -186,9 +195,12 @@ impl ClaudeOAuthClient {
         &self,
         creds: &mut ClaudeOAuthCredentials,
     ) -> Result<(), ClaudeOAuthError> {
+        // Explicit clone — the `json!` macro serializes by reference under
+        // the hood, but cloning here makes the intent obvious and protects
+        // against a future maintainer accidentally moving out of `*creds`.
         let body = serde_json::json!({
             "grant_type": "refresh_token",
-            "refresh_token": creds.refresh_token,
+            "refresh_token": creds.refresh_token.clone(),
             "client_id": CLIENT_ID,
         });
         let token = self.exchange_with_fallback(&body).await?;

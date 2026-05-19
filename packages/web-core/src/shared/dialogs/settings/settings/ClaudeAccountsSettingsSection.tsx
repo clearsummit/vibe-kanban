@@ -62,22 +62,28 @@ function useStatusLabel(s: ClaudeAccountStatus): string {
 
 function formatLocal(ts: string | null | undefined): string {
   if (!ts) return '—';
-  try {
-    return new Date(ts).toLocaleString();
-  } catch {
-    return ts;
-  }
+  // `new Date(badInput)` doesn't throw; it produces a Date whose
+  // `getTime()` is NaN and whose `toLocaleString()` returns the literal
+  // string "Invalid Date". Guard explicitly so a malformed timestamp
+  // surfaces as "—" rather than leaking that placeholder to the UI.
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString();
 }
 
 function useCountdown(targetIso: string | null | undefined): string {
   const [now, setNow] = useState(() => Date.now());
+  const target = useMemo(() => {
+    if (!targetIso) return Number.NaN;
+    return new Date(targetIso).getTime();
+  }, [targetIso]);
   useEffect(() => {
-    if (!targetIso) return;
+    if (!targetIso || Number.isNaN(target)) return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [targetIso]);
-  if (!targetIso) return '';
-  const target = new Date(targetIso).getTime();
+  }, [targetIso, target]);
+  // Invalid input or no target: render nothing rather than "NaNs".
+  if (!targetIso || Number.isNaN(target)) return '';
   const remaining = Math.max(0, target - now);
   if (remaining <= 0) return '0s';
   const seconds = Math.floor(remaining / 1000);

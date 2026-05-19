@@ -361,9 +361,19 @@ impl ClaudeAccountsStore {
         }
     }
 
-    /// Round-robin select the next non-throttled, non-disabled, non-needs-reauth
-    /// account, skipping any in `exclude`. Returns the soonest `throttled_until`
-    /// if no healthy account remains.
+    /// Select the next non-throttled, non-disabled, non-needs-reauth account,
+    /// skipping any id in `exclude`.
+    ///
+    /// Ordering policy:
+    ///   1. Sort by `precedence` ascending — lower number = higher priority.
+    ///      User-configurable via the Settings UI reorder controls.
+    ///   2. Tie-break by `last_used_at` ascending (least-recently-used first)
+    ///      so accounts at the same precedence tier spread load evenly.
+    ///
+    /// Returns `AllThrottledUntil(t)` (with `t` = soonest `throttled_until`)
+    /// if every enrolled account is currently Throttled. Note: this is *not*
+    /// round-robin once accounts have distinct precedence values — the
+    /// highest-priority healthy account is always picked first.
     pub async fn pick_next(&self, exclude: &[Uuid]) -> PickNextResult {
         let mut guard = self.accounts.write().await;
         self.unthrottle_expired_locked(&mut guard).await;

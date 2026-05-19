@@ -931,7 +931,13 @@ export type UpdateClaudeAccount = { label: string | null, disabled: boolean | nu
 
 export type ReorderClaudeAccounts = { 
 /**
- * Full desired ordering by id, highest-precedence first.
+ * Full desired ordering by account id. **The first id is picked
+ * first** by the rotator. The backend assigns precedence by
+ * position (`order[0]` → precedence 0, `order[1]` → precedence 1,
+ * …); lower numeric precedence = higher priority. Ids not present
+ * in this list keep their existing relative order at the end —
+ * defensive against stale clients that miss a newly-enrolled
+ * account.
  */
 order: Array<string>, };
 

@@ -93,9 +93,12 @@ components:
         order:
           type: array
           description: |
-            Full desired ordering by account id, highest-precedence first.
-            Ids not present here keep their existing relative order at the
-            end (defensive against stale clients that miss a new account).
+            Full desired ordering by account id. **The first id is picked
+            first** by the rotator. The backend assigns precedence by
+            position (order[0] → precedence 0, order[1] → precedence 1,
+            …); lower numeric precedence = higher priority. Ids not
+            present here keep their existing relative order at the end
+            (defensive against stale clients that miss a new account).
           items: { type: string, format: uuid }
 
     ClaudeOAuthStartRequest:
