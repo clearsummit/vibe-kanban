@@ -97,7 +97,7 @@ async fn patch_account(
             .await
             .into_iter()
             .find(|a| a.id == id)
-            .ok_or_else(|| ApiError::BadRequest("account not found".into()))?,
+            .ok_or_else(|| ApiError::NotFound("account not found".into()))?,
     };
     Ok(ResponseJson(ApiResponse::success(view)))
 }
@@ -154,7 +154,8 @@ async fn put_retry_policy(
 fn store_err(err: services::services::claude_accounts::store::StoreError) -> ApiError {
     use services::services::claude_accounts::store::StoreError;
     match err {
-        StoreError::NotFound(id) => ApiError::BadRequest(format!("account {id} not found")),
+        // Aligns with the OpenAPI contract — 404 (not 400) for missing ids.
+        StoreError::NotFound(id) => ApiError::NotFound(format!("account {id} not found")),
         StoreError::Io(e) => ApiError::Io(e),
         StoreError::Json(e) => ApiError::BadRequest(format!("invalid stored data: {e}")),
         StoreError::OAuth(e) => ApiError::BadRequest(e.to_string()),

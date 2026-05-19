@@ -76,11 +76,25 @@ pub fn classify_failure(stdout: &str, stderr: &str, exit_code: Option<i32>) -> F
         return FailureClass::Transient;
     }
     // 4. Bias toward Transient when the exit code suggests recoverable failure
-    //    AND we have at least *some* error context — keeps recoverable runs alive
-    //    without classifying clean exit 0 as a failure.
+    //    AND we have at least *some* error context — keeps recoverable runs
+    //    alive on unmatched-but-likely-network failures (e.g. SIGPIPE, DNS
+    //    blip with no recognized text), without classifying a clean exit 0
+    //    as a failure or retrying on a hard crash.
     match exit_code {
-        Some(0) => FailureClass::Fatal, // exit 0 means success; if caller is classifying, something else is wrong
-        _ => FailureClass::Fatal,
+        // Exit 0 = process exited cleanly; caller is in the wrong path.
+        Some(0) => FailureClass::Fatal,
+        // Negative exit codes (Unix `< 0` from `child.wait`) usually mean the
+        // process was killed by a signal; treat as Fatal to surface the cause.
+        Some(c) if c < 0 => FailureClass::Fatal,
+        // Unknown exit code (process killed externally without status) —
+        // assume transient and let the user retry budget catch a loop.
+        None => FailureClass::Transient,
+        // Any other non-zero exit with non-empty captured output — bias
+        // toward Transient so we don't drop the attempt on an unrecognized
+        // network/transient error.
+        Some(_) if !combined.trim().is_empty() => FailureClass::Transient,
+        // Non-zero exit with NO captured output: no signal at all — Fatal.
+        Some(_) => FailureClass::Fatal,
     }
 }
 
@@ -179,9 +193,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_error_classifies_as_fatal() {
+    fn unknown_error_with_output_classifies_as_transient() {
+        // Per spec FR-012 bias rule: unrecognized non-zero exit + non-empty
+        // output is more likely a transient blip than a hard crash. Let the
+        // retry budget catch a loop rather than dropping the attempt.
         let stderr = "Something else went wrong";
-        assert_eq!(classify_failure("", stderr, Some(1)), FailureClass::Fatal);
+        assert_eq!(
+            classify_failure("", stderr, Some(1)),
+            FailureClass::Transient
+        );
+    }
+
+    #[test]
+    fn empty_output_with_nonzero_exit_classifies_as_fatal() {
+        // No signal at all — don't retry blindly.
+        assert_eq!(classify_failure("", "", Some(1)), FailureClass::Fatal);
+    }
+
+    #[test]
+    fn signal_kill_classifies_as_fatal() {
+        // Negative exit = killed by signal; surface as Fatal so the user
+        // sees what crashed instead of retrying a doomed process.
+        let stderr = "...";
+        assert_eq!(classify_failure("", stderr, Some(-1)), FailureClass::Fatal);
     }
 
     #[test]

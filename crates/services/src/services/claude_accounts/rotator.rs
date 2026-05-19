@@ -136,9 +136,31 @@ impl Rotator {
 fn truncate_for_log(s: &str) -> String {
     const MAX: usize = 1024;
     if s.len() <= MAX {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..MAX])
+        return s.to_string();
+    }
+    // Find the largest char boundary at-or-before MAX so we never slice in
+    // the middle of a multi-byte sequence (would panic at runtime).
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i <= MAX)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    format!("{}…", &s[..cut])
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_for_log;
+
+    #[test]
+    fn truncate_handles_multibyte_at_boundary() {
+        // 512 4-byte emoji chars = 2048 bytes — straddles the 1024 cut point.
+        let s: String = "🦀".repeat(512);
+        let out = truncate_for_log(&s);
+        // Must not panic + must be valid UTF-8 (smoke check via len > 0).
+        assert!(out.ends_with('…'));
+        assert!(out.len() < s.len() + 4);
     }
 }
 

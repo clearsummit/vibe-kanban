@@ -98,7 +98,10 @@ impl ClaudeAccountsStore {
     }
 
     pub async fn list_views(&self) -> Vec<ClaudeAccountView> {
-        let guard = self.accounts.read().await;
+        // Clear expired throttles so the UI reflects the same state the
+        // rotator would see on the next spawn (matters after restart).
+        let mut guard = self.accounts.write().await;
+        self.unthrottle_expired_locked(&mut guard).await;
         let mut views: Vec<ClaudeAccountView> = guard.iter().map(ClaudeAccountView::from).collect();
         // Surface in precedence order so the UI table matches the rotation order.
         views.sort_by_key(|v| v.precedence);
@@ -303,18 +306,23 @@ impl ClaudeAccountsStore {
     }
 
     /// Clear a `Throttled` account whose `throttled_until` has passed. Called
-    /// at the start of each `pick_next()`.
+    /// at the start of each `pick_next()` and `list_views()` so user-visible
+    /// status (and rotator decisions) stay accurate even across restarts.
     async fn unthrottle_expired_locked(&self, accounts: &mut [ClaudeAccount]) {
         let now = Utc::now();
         for acct in accounts.iter_mut() {
             if acct.status == ClaudeAccountStatus::Throttled
                 && acct.throttled_until.map(|t| t <= now).unwrap_or(false)
             {
+                // Capture the prior reason BEFORE clearing it — otherwise the
+                // weekly-window reset branch can never fire (it was reading
+                // the field we just set to None).
+                let prior_reason = acct.throttle_reason;
                 acct.status = ClaudeAccountStatus::Active;
                 acct.throttled_until = None;
                 acct.throttle_reason = None;
                 acct.five_hour_window = ClaudeAccountUsageWindow::default();
-                if acct.throttle_reason == Some(ClaudeAccountThrottleReason::Weekly) {
+                if prior_reason == Some(ClaudeAccountThrottleReason::Weekly) {
                     acct.weekly_window = ClaudeAccountUsageWindow::default();
                 }
             }
@@ -367,14 +375,17 @@ impl ClaudeAccountsStore {
         id: Uuid,
         debounce_map: &DashMap<Uuid, AtomicU64>,
     ) -> Result<(), StoreError> {
+        // Always update the in-memory counters + last_used_at so the
+        // rotator's pick_next sees fresh state even on rapid-fire successes.
+        // Only the disk write is debounced (at 1/s/account), preventing
+        // chatty fsyncs during a burst.
         let now_ms = Utc::now().timestamp_millis();
         let entry = debounce_map.entry(id).or_insert_with(|| AtomicU64::new(0));
         let last = entry.load(Ordering::Relaxed) as i64;
-        if now_ms - last < 1000 {
-            // Still increment the counter in memory but skip the disk write.
-            return Ok(());
+        let should_persist = now_ms - last >= 1000;
+        if should_persist {
+            entry.store(now_ms as u64, Ordering::Relaxed);
         }
-        entry.store(now_ms as u64, Ordering::Relaxed);
         drop(entry);
 
         let mut guard = self.accounts.write().await;
@@ -385,7 +396,9 @@ impl ClaudeAccountsStore {
         acct.last_used_at = Some(Utc::now());
         acct.five_hour_window.used = acct.five_hour_window.used.saturating_add(1);
         acct.weekly_window.used = acct.weekly_window.used.saturating_add(1);
-        self.save_locked(&guard).await?;
+        if should_persist {
+            self.save_locked(&guard).await?;
+        }
         Ok(())
     }
 

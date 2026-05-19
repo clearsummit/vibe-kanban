@@ -88,11 +88,13 @@ export function ClaudeAccountsSettingsSection() {
   const [policySaving, setPolicySaving] = useState(false);
   const [policyError, setPolicyError] = useState<string | null>(null);
   const [policySuccess, setPolicySuccess] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [addState, setAddState] = useState<AddAccountState | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const [a, p] = await Promise.all([
         claudeAccountsApi.list(),
@@ -101,6 +103,10 @@ export function ClaudeAccountsSettingsSection() {
       setAccounts(a);
       setPolicy(p);
       setPolicyDraft(p);
+    } catch (e) {
+      // Don't render an empty-state on a network/API failure — that misleads
+      // the user into thinking they have no enrolled accounts.
+      setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -241,6 +247,21 @@ export function ClaudeAccountsSettingsSection() {
         {loading ? (
           <div className="flex items-center gap-2 text-sm text-low">
             <SpinnerIcon className="animate-spin" /> Loading…
+          </div>
+        ) : loadError ? (
+          <div className="space-y-3">
+            <p className="text-sm text-red-500 flex items-center gap-1">
+              <WarningIcon /> Failed to load Claude accounts: {loadError}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                void refresh();
+              }}
+              className="text-sm underline text-brand"
+            >
+              Retry
+            </button>
           </div>
         ) : accounts.length === 0 ? (
           <div className="space-y-3">

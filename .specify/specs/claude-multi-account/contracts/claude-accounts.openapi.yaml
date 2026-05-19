@@ -53,7 +53,13 @@ components:
     ClaudeAccountView:
       type: object
       required:
-        [id, label, created_at, status, five_hour_window, weekly_window]
+        - id
+        - label
+        - created_at
+        - status
+        - five_hour_window
+        - weekly_window
+        - precedence
       properties:
         id: { type: string, format: uuid }
         label: { type: string }
@@ -74,6 +80,23 @@ components:
           oneOf:
             - $ref: '#/components/schemas/ClaudeAccountLastError'
             - type: 'null'
+        precedence:
+          type: integer
+          description: |
+            User-configurable rotation precedence. Lower values are picked
+            first. Re-orderable via `POST /claude-accounts/reorder`.
+
+    ReorderClaudeAccounts:
+      type: object
+      required: [order]
+      properties:
+        order:
+          type: array
+          description: |
+            Full desired ordering by account id, highest-precedence first.
+            Ids not present here keep their existing relative order at the
+            end (defensive against stale clients that miss a new account).
+          items: { type: string, format: uuid }
 
     ClaudeOAuthStartRequest:
       type: object
@@ -183,6 +206,31 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+
+  /claude-accounts/reorder:
+    post:
+      summary: Replace the full rotation order of enrolled accounts
+      operationId: reorderClaudeAccounts
+      description: |
+        Returns the updated list of accounts in precedence order. Ids not
+        present in `order` keep their existing relative order at the end.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReorderClaudeAccounts' }
+      responses:
+        '200':
+          description: Updated list of accounts, sorted in the new order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ClaudeAccountView' }
 
   /claude-accounts/{id}:
     patch:
