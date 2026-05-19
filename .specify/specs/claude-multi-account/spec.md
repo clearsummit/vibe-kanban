@@ -30,52 +30,66 @@ As a Vibe Kanban user, I want to add one or more Claude accounts to Vibe Kanban 
 
 ---
 
-### User Story 2 — Automatic rotation and retry on failure (Priority: P1)
+### User Story 2 — Retry-with-back-off and rotation on usage exhaustion (Priority: P1)
 
-As a Vibe Kanban user running long agent tasks, I want my task attempt to keep going when a single Claude request fails or hits a rate limit, by automatically switching to my next enrolled account and retrying with exponential back-off, so that I don't have to babysit the run.
+As a Vibe Kanban user running long agent tasks, I want the task attempt to keep going when Claude returns a transient error (e.g., a 400/5xx/network blip) by retrying the same account with exponential back-off, AND to automatically rotate to my next enrolled account specifically when the current account is out of its Anthropic usage quota (5-hour or weekly limit), so that I don't have to babysit the run.
 
-**Why this priority**: This is the user's stated pain ("right now when Claude gives us a 400, the progress stops"). It is the headline value of the feature — multi-account enrollment without rotation/retry would be a worse UX than today.
+**Why this priority**: This is the user's stated pain ("right now when Claude gives us a 400, the progress stops"). It is the headline value of the feature — multi-account enrollment without retry/rotation would be a worse UX than today.
 
-**Independent Test**: Enroll two accounts. Force the first account into a rate-limit response (e.g., by mocking the Claude CLI to exit with a 429-shaped stderr). Confirm that the executor logs a back-off, switches to the second account, and the task completes successfully without user input.
+**Rotation policy (decided)**:
+- **Transient errors** (400/5xx/network/transport): retry the SAME account with exponential back-off. Do NOT rotate.
+- **Usage-exhausted errors** (Anthropic 5-hour cap reached, Anthropic weekly cap reached, "usage limit"/"quota" errors): mark the current account "Throttled until <reset_time>", rotate to the next healthy account, do NOT sleep if another healthy account exists.
+- **Permanent auth errors** (revoked/invalid token): mark the account "Needs re-auth", rotate to the next healthy account, do NOT count against retry budget.
+
+**Retry counter persistence**: The current retry count for an in-flight task attempt persists across application restart so a crash mid-back-off does not reset the budget.
+
+**Independent Test**: Enroll two accounts. Induce a `usage_limit` response from the first account (e.g., by mocking the Claude CLI to exit with a usage-exhausted-shaped stderr). Confirm that the executor immediately switches to the second account without sleeping and the task completes. Separately, induce a transient 5xx from a single-account install and confirm the SAME account retries with exponential back-off until the request succeeds.
 
 **Acceptance Scenarios**:
 
-1. **Given** two healthy enrolled accounts and an active task attempt, **When** the active account returns a retryable failure (rate limit, transient 5xx, network error), **Then** Vibe Kanban marks the account "Throttled" with a back-off until-timestamp, sleeps for the back-off interval, switches to the next healthy account, and resumes the task attempt without user intervention.
-2. **Given** all enrolled accounts are throttled, **When** the executor needs to spawn a Claude process, **Then** Vibe Kanban waits until the soonest unblock-time, then retries with the account whose back-off expired first.
-3. **Given** the active account returns a non-retryable failure (e.g., invalid credentials, permanently revoked token), **When** the executor detects it, **Then** the account is marked "Needs re-auth", the task attempt switches to the next healthy account, and the user is shown a re-auth prompt in Settings.
-4. **Given** the retry policy's maximum attempt count is exceeded across all accounts, **When** all retries are exhausted, **Then** the task attempt is marked failed with a normalized log entry that names the last error and which accounts were tried.
-5. **Given** a back-off is in progress, **When** the user cancels the task attempt, **Then** the back-off sleep is interrupted and the attempt stops within 2 seconds.
+1. **Given** an active task attempt and the active account returns a transient error (400, 5xx, network), **When** the executor detects the failure, **Then** Vibe Kanban sleeps for the next exponential back-off interval and retries against the SAME account, without marking the account throttled and without rotating.
+2. **Given** two or more enrolled accounts and the active account returns a usage-exhausted error, **When** the executor detects the failure, **Then** Vibe Kanban marks the active account "Throttled" with the reset-time from the error (or a sensible fallback) and immediately rotates to the next healthy account WITHOUT a back-off sleep.
+3. **Given** only one healthy account remains and it returns a usage-exhausted error, **When** the executor needs to spawn a Claude process, **Then** Vibe Kanban waits until the soonest reset-time, then retries.
+4. **Given** the active account returns a permanent auth failure (revoked/invalid token), **When** the executor detects it, **Then** the account is marked "Needs re-auth", the task attempt rotates to the next healthy account, the user is shown a re-auth prompt in Settings, and the failure does NOT count against the retry budget.
+5. **Given** the user-configured maximum retry attempts is exceeded for a single task attempt, **When** all retries are exhausted, **Then** the task attempt is marked failed with a normalized log entry that names the last error class and every account that was tried.
+6. **Given** a back-off sleep is in progress for the active account, **When** the user cancels the task attempt, **Then** the back-off sleep is interrupted and the attempt stops within 2 seconds.
+7. **Given** the application is restarted in the middle of a retry sequence, **When** Vibe Kanban resumes the task attempt, **Then** the retry counter resumes from its persisted value (does not reset to 0) and any unexpired throttled-until timestamps are honored.
 
 ---
 
-### User Story 3 — View accounts and per-account usage in Settings (Priority: P2)
+### User Story 3 — View accounts with 5-hour and weekly usage in Settings (Priority: P2)
 
-As a Vibe Kanban user, I want to see all my enrolled Claude accounts, their current status, when they were last used, and how much I've used each one, so that I can decide whether to add another account or pause an over-used one.
+As a Vibe Kanban user, I want to see each enrolled Claude account along with its current Anthropic 5-hour usage, the 5-hour reset time, its weekly usage, and the weekly reset time, so that I can predict which account the rotator will pick next, decide whether to add another account, or disable an over-used one.
 
-**Why this priority**: Strong UX win but the rotation/retry in P2 works without observability. Treat as the "make it understandable" layer on top of the engine.
+**Why this priority**: Strong UX win but the rotation/retry engine works without observability. Treat as the "make it understandable" layer on top of the engine.
 
-**Independent Test**: Enroll two accounts, run a small task. Open Settings → Claude Accounts. Both rows show distinct request counts, distinct last-used timestamps, and the status of each (Active / Throttled with countdown / Needs re-auth / Disabled).
+**Independent Test**: Enroll two accounts, run a small task that consumes some quota on Account A. Open Settings → Claude Accounts. Account A row shows non-zero 5-hour usage with a future reset time, weekly usage with a weekly reset time, and Active status. Account B row shows zero 5-hour usage and Active status. Throttle Account A (e.g., induce a usage_limit error); confirm the row flips to "Throttled until <5h reset_time>" with a live countdown.
 
 **Acceptance Scenarios**:
 
-1. **Given** at least one enrolled account, **When** the user opens Settings → Claude Accounts, **Then** each account row shows label, status, last-used timestamp, request count since enrollment, and the most recent error (if any).
-2. **Given** an account is currently throttled, **When** the user views the accounts list, **Then** that row shows a countdown until back-off expires.
-3. **Given** the user clicks "Disable" on an active account, **When** the action confirms, **Then** the account is moved to "Disabled" status and is skipped by the rotator until the user re-enables it.
-4. **Given** the user clicks "Remove" on an account, **When** the action is confirmed via a destructive-action dialog, **Then** the account and its locally stored credentials are deleted and the row disappears.
-5. **Given** the user clicks "Re-auth" on a "Needs re-auth" account, **When** the OAuth flow completes, **Then** the existing account's credentials are replaced (its id, label, and usage history are preserved) and its status returns to "Active".
+1. **Given** at least one enrolled account, **When** the user opens Settings → Claude Accounts, **Then** each account row shows: account name, status (Active / Throttled / Needs re-auth / Disabled), 5-hour usage (used or used/limit), 5-hour reset time, weekly usage (used or used/limit), weekly reset time.
+2. **Given** an account is currently throttled because the 5-hour window is exhausted, **When** the user views the accounts list, **Then** that row shows "Throttled until <reset_time>" with a live countdown until the 5-hour reset.
+3. **Given** an account is currently throttled because the weekly window is exhausted, **When** the user views the accounts list, **Then** that row shows "Throttled until <weekly_reset_time>" with a live countdown until the weekly reset.
+4. **Given** the user clicks "Disable" on an Active account, **When** the action confirms, **Then** the account is moved to "Disabled" status and is skipped by the rotator until the user re-enables it.
+5. **Given** the user clicks "Remove" on an account, **When** the action is confirmed via a destructive-action dialog, **Then** the account and its locally stored credentials are deleted and the row disappears.
+6. **Given** the user clicks "Re-auth" on a "Needs re-auth" account, **When** the OAuth flow completes, **Then** the existing account's credentials are replaced (id, label, and usage history are preserved) and the status returns to "Active".
+7. **Given** the user opens the retry settings panel, **When** they change the "Maximum retry attempts per task attempt" value, **Then** the new value is persisted and applies to all subsequent task attempts immediately.
 
 ---
 
 ### Edge Cases
 
-- **Single-account regression**: A user with exactly one enrolled account must see no behavior change other than the new Settings UI and the retry-with-back-off (no rotation needed; back-off and retry against the same account still apply).
+- **Single-account regression**: A user with exactly one enrolled account must see no behavior change other than the new Settings UI and the retry-with-back-off. Usage-exhausted on the only account waits for the reset time (no rotation possible); transient errors retry the same account.
 - **No accounts enrolled at all**: The Claude executor falls back to whatever credentials exist in the user's actual `~/.claude/.credentials.json` (today's behavior), so existing installs keep working without forced migration.
 - **Token refresh during a long run**: If an account's access token expires mid-task, the system refreshes it transparently using the refresh token and does NOT count this as a retry.
-- **Credentials file corruption**: If the accounts file is unreadable or malformed, the system renames it to `claude_accounts.json.bad`, starts with an empty list, and surfaces a one-time warning in Settings.
+- **Credentials file corruption**: If the accounts file is unreadable or malformed, the system renames it to a backup name, starts with an empty list, and surfaces a one-time warning in Settings.
 - **Concurrent task attempts**: Two task attempts running in parallel must not collide over the active-account selection. Each attempt must get an isolated credential context.
-- **Stderr-pattern false positives**: A user-authored prompt that contains the phrase "rate limit" must not trigger account rotation. Pattern detection MUST be scoped to stderr lines, not stdout/assistant content.
-- **Clock skew**: Back-off "until" timestamps are stored as absolute UTC; the rotator does not depend on monotonic clocks across process restarts.
-- **Process killed during back-off**: If Vibe Kanban is restarted mid-back-off, account statuses MUST persist and the rotator MUST honor any unexpired back-off on next spawn.
+- **Pattern-detection false positives**: A user-authored prompt that contains the phrase "rate limit" or "quota" must not trigger account rotation. Usage-exhausted detection MUST be scoped to executor exit signals (e.g., stderr lines emitted by the Claude CLI itself), not stdout/assistant content.
+- **Distinguishing transient from usage-exhausted**: A naked HTTP 429 with no explicit usage-window context defaults to transient (retry same account); only signals that clearly indicate the 5h or weekly cap (the CLI's `usage_limit`-shaped error or an explicit `quota exceeded`) trigger rotation. Misclassification toward transient is preferred (fewer false rotations).
+- **Clock skew**: Throttled-until reset timestamps are stored as absolute UTC. The countdown UI honors these even across process restarts.
+- **Process killed during back-off**: If Vibe Kanban is restarted mid-back-off, account statuses, throttled-until timestamps, AND the retry counter for the in-flight task attempt MUST persist; on resume the rotator honors any unexpired throttled-until and the retry budget continues from where it left off.
+- **Unknown usage window**: If the Claude CLI does not surface a structured reset time, the system uses a conservative default (e.g., 1 hour for the 5h window, end-of-current-week UTC for the weekly window) and updates it on the next successful response that surfaces real usage data.
+- **Max-retries set to 0**: Allowed — disables retry entirely. The first failure surfaces as a hard task failure (matches today's behavior).
 
 ## Requirements *(mandatory)*
 
@@ -96,57 +110,90 @@ As a Vibe Kanban user, I want to see all my enrolled Claude accounts, their curr
 - **FR-008**: Credential files MUST be created with owner-read/write-only permissions on Unix (`0600`).
 - **FR-009**: System MUST tolerate a missing or unreadable credentials store by recovering to an empty list and surfacing a single, dismissible warning.
 
-#### Rotation and retry
+#### Account selection (rotation)
 
 - **FR-010**: When spawning a Claude executor, the system MUST select exactly one enrolled, non-disabled, non-throttled account; if no enrolled accounts exist, it MUST fall back to the user's ambient Claude credentials.
 - **FR-011**: System MUST isolate the selected account's credentials to the spawned executor process only (i.e., MUST NOT mutate the user's actual `~/.claude/.credentials.json` or other ambient Claude state).
-- **FR-012**: When the executor exits with an error matching a retryable failure pattern (rate-limit, quota, transient transport, 5xx), the system MUST mark the active account as Throttled with a back-off "until" timestamp and retry.
-- **FR-013**: Back-off MUST follow a capped exponential schedule (e.g., 60s → 5m → 30m, capped at 30m) per account.
-- **FR-014**: Retries MUST rotate to the next non-throttled account before sleeping; the system MUST only sleep on the back-off interval if no other healthy account is available.
-- **FR-015**: System MUST cap total retry attempts per task attempt at a configurable maximum (default: 6) and mark the task attempt failed if the cap is exceeded.
-- **FR-016**: When the executor exits with a non-retryable authentication failure (e.g., revoked token), the system MUST mark the account "Needs re-auth", skip it for rotation, and continue retrying with other accounts.
-- **FR-017**: User-initiated cancellation of a task attempt MUST interrupt any in-progress back-off sleep within 2 seconds.
-- **FR-018**: System MUST persist account status (including throttled-until timestamps) across application restarts.
+- **FR-012**: System MUST classify executor failures into one of: (a) `Transient` — generic 400, 5xx, network/transport, ambiguous 429 with no usage-window context; (b) `UsageExhausted` — Anthropic 5-hour or weekly usage cap hit (matched by explicit "usage limit"/"quota exceeded"/`usage_limit`-shaped signals from the Claude CLI); (c) `NeedsReauth` — revoked/invalid token, 401/403 with auth context; (d) `Fatal` — anything else that should hard-fail.
+
+#### Retry-with-back-off (Transient errors)
+
+- **FR-013**: On a `Transient` failure, the system MUST sleep for the next exponential-back-off interval (using a Unix-style monotonic sleep, NOT an OS scheduler / cron) and retry the SAME account.
+- **FR-014**: Back-off MUST follow a capped exponential schedule with user-configurable initial delay, multiplier, and cap. The default schedule is: initial 30s, multiplier 2x, cap 5m (30s → 1m → 2m → 4m → 5m → 5m …). The schedule MUST NOT rotate accounts.
+- **FR-015**: Total retry attempts per task attempt MUST be capped at a user-configurable maximum. The default is 6. The setting `0` MUST be allowed and MUST disable retry entirely.
+- **FR-016**: User-initiated cancellation of a task attempt MUST interrupt any in-progress back-off sleep within 2 seconds.
+
+#### Rotation (UsageExhausted) — the ONLY trigger for rotation
+
+- **FR-017**: On a `UsageExhausted` failure, the system MUST mark the active account as `Throttled` with a `throttled_until` timestamp set to the reset time reported by the error (or to a conservative default — 1 hour for the 5h window, end-of-current-week UTC for the weekly window — if no structured reset time is available).
+- **FR-018**: After marking the account `Throttled`, the system MUST immediately rotate to the next healthy enrolled account WITHOUT a back-off sleep, and MUST retry the task attempt against that account.
+- **FR-019**: If no healthy account remains, the system MUST sleep until the soonest `throttled_until` timestamp, then retry against that account.
+- **FR-020**: A `UsageExhausted` rotation MUST count against the retry budget (FR-015) the same way a `Transient` retry does, so a pathological cycle cannot loop forever.
+
+#### Permanent auth failures
+
+- **FR-021**: On a `NeedsReauth` failure, the system MUST mark the account `NeedsReauth`, skip it for selection until the user re-authorizes, and rotate to the next healthy account. This failure MUST NOT count against the retry budget.
+
+#### State persistence
+
+- **FR-022**: Account status (including `throttled_until` timestamps and `NeedsReauth` flags) MUST persist across application restarts.
+- **FR-023**: The current retry counter for an in-flight task attempt MUST persist across application restarts; on resume, the counter continues from its persisted value rather than resetting to zero. (Persisted retry counts.)
 
 #### Token lifecycle
 
-- **FR-019**: System MUST refresh expired access tokens using the stored refresh token without counting the refresh as a retry attempt.
-- **FR-020**: If token refresh fails with a non-retryable error, the system MUST move the account to "Needs re-auth" and rotate to another account.
+- **FR-024**: System MUST refresh expired access tokens transparently using the stored refresh token. A successful refresh MUST NOT count as a retry.
+- **FR-025**: If token refresh fails with a non-retryable error, the system MUST move the account to `NeedsReauth` and apply FR-021.
 
-#### Observability and Settings UI
+#### Usage tracking
 
-- **FR-021**: Settings MUST include a "Claude Accounts" section listing every enrolled account with: label, status (Active / Throttled / Needs re-auth / Disabled), last-used timestamp, request count since enrollment, and last-error summary.
-- **FR-022**: A throttled account row MUST display a live countdown until back-off expiry.
-- **FR-023**: Per-attempt logs MUST include normalized entries indicating account selection, back-off start/end, and rotation events, scoped so they can be filtered out of model output but remain visible to the user.
+- **FR-026**: System MUST track, per enrolled account: current 5-hour usage (used count and reset time) and current weekly usage (used count and reset time). Values MUST be updated from data surfaced by the Claude CLI on successful and failed spawns; when no structured usage data is available, the system MUST fall back to its own incremented counter and the conservative reset defaults defined in FR-017.
+
+#### Settings UI
+
+- **FR-027**: Settings MUST include a "Claude Accounts" section listing every enrolled account with the following columns: account name, status (Active / Throttled / Needs re-auth / Disabled), 5-hour usage, 5-hour reset time, weekly usage, weekly reset time.
+- **FR-028**: A `Throttled` row MUST display a live countdown until the relevant reset time.
+- **FR-029**: Settings MUST expose a "Retry policy" panel with editable fields for: maximum retry attempts (integer ≥ 0), initial back-off delay (seconds), back-off multiplier (decimal ≥ 1), maximum back-off (seconds). Changes MUST persist immediately and apply to all subsequent task attempts.
+- **FR-030**: Per-attempt logs MUST include normalized entries indicating: account selection, classification of any failure (`Transient` / `UsageExhausted` / `NeedsReauth` / `Fatal`), back-off start/end, and rotation events.
 
 ### Key Entities
 
-- **ClaudeAccount**: Represents one enrolled Claude OAuth identity. Attributes: stable id, user-facing label, full credential blob (access token, refresh token, expires-at), created-at, last-used-at, request count, status (Active / Throttled / NeedsReauth / Disabled), throttled-until (nullable), last-error (nullable text + timestamp).
-- **AccountSelection**: Per-spawn snapshot of which account was used and how. Attributes: account id, spawn timestamp, outcome (success / retryable-failure / non-retryable-failure), back-off applied (nullable duration), error classification (nullable enum).
-- **RetryPolicy**: Effective retry configuration for a spawn. Attributes: max attempts per task attempt, base back-off, max back-off, retryable-error classifier (the pattern set).
+- **ClaudeAccount**: Represents one enrolled Claude OAuth identity. Attributes: stable id, user-facing label, full credential blob (access token, refresh token, expires-at), created-at, last-used-at, status (`Active` / `Throttled` / `NeedsReauth` / `Disabled`), throttled-until (nullable), throttle-reason (`five_hour` / `weekly` / null), five-hour usage (used count, reset-at), weekly usage (used count, reset-at), last-error (nullable text + timestamp + classification).
+- **RetryPolicy**: User-editable configuration in Settings. Attributes: max attempts per task attempt (integer ≥ 0, default 6), initial back-off seconds (default 30), back-off multiplier (default 2.0), max back-off seconds (default 300).
+- **TaskAttemptRetryState**: Per task attempt persisted retry state. Attributes: task-attempt-id, current attempt number, last failure classification, last back-off duration, accounts tried (ordered list).
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
 - **SC-001**: A user with zero prior Claude credentials can enroll a working account from the Settings UI in under 90 seconds end-to-end (open Settings → click Add → complete OAuth → see Active row).
-- **SC-002**: With two or more healthy accounts enrolled, a task attempt that would have failed today due to a single 429/quota response from Claude succeeds without user intervention in at least 95% of induced rate-limit scenarios in test.
-- **SC-003**: The mean time the system spends sleeping on back-off when at least one healthy alternate account exists is under 1 second per rotation event (i.e., rotation happens before sleep).
-- **SC-004**: 0 incidents in test of the rotator mutating the user's ambient `~/.claude/.credentials.json` or leaking credentials between concurrent task attempts.
-- **SC-005**: Existing installs with no enrolled accounts continue to run tasks with no behavior change other than the new Settings section being visible (zero-config backward compatibility).
-- **SC-006**: A user can identify, from Settings, which account is currently throttled and how long until it recovers, without consulting application logs.
-- **SC-007**: A task attempt that exhausts all retries fails with a normalized log entry naming every account tried and the final error class — 0 "silent" terminations.
+- **SC-002**: With two or more healthy accounts enrolled, a task attempt that would have failed today due to a `UsageExhausted` response from Claude succeeds without user intervention in at least 95% of induced usage-exhausted scenarios in test.
+- **SC-003**: When at least one healthy alternate account exists, the time spent sleeping on back-off in response to a `UsageExhausted` event is under 1 second per rotation event (i.e., rotation happens before any sleep).
+- **SC-004**: A single-account task attempt that hits a `Transient` 5xx recovers without user intervention in at least 95% of induced-transient-error scenarios in test, given the default retry policy (6 attempts).
+- **SC-005**: 0 incidents in test of the rotator mutating the user's ambient `~/.claude/.credentials.json` or leaking credentials between concurrent task attempts.
+- **SC-006**: Existing installs with no enrolled accounts continue to run tasks with no behavior change other than the new Settings section being visible (zero-config backward compatibility).
+- **SC-007**: A user can identify, from Settings, which account is currently throttled, what kind of cap (5h or weekly) is the cause, and how long until it resets, without consulting application logs.
+- **SC-008**: A task attempt that exhausts all retries fails with a normalized log entry naming every account tried and the final error class — 0 "silent" terminations.
+- **SC-009**: A user can change the maximum retry attempts (and back-off knobs) from the Settings UI, and the new values apply to the next task attempt with no application restart required.
+- **SC-010**: An application restart in the middle of a retry sequence preserves the retry counter — counted by comparing in-flight attempt count before and after restart in test.
+
+## Resolved Clarifications (from user input)
+
+- **Max retry attempts**: User-configurable in the UI. Default 6. `0` is allowed (disables retry). See FR-015 and FR-029.
+- **Back-off shape**: Exponential, with user-configurable initial delay / multiplier / cap. Default 30s × 2 capped at 5m. See FR-014.
+- **Rotation trigger**: ONLY on `UsageExhausted` (Anthropic 5h or weekly cap). Transient errors retry the SAME account. See FR-013 vs FR-017/018.
+- **Retry counter persistence**: Persisted across application restart. The retry counter for an in-flight task attempt is durable. See FR-023.
+- **Settings UI columns**: account name, 5-hour usage, 5-hour reset time, weekly usage, weekly reset time, plus status. See FR-027.
+- **Default account label**: Use Anthropic OAuth userinfo (email) when available; fall back to "Account N".
 
 ## Out of Scope
 
 - Sharing or syncing enrolled accounts across machines or users (credentials stay local).
 - Per-project or per-task-attempt account pinning (a user-selectable "use account X for this project only" rule).
-- Cost/usage dashboards beyond the simple per-account request counter.
-- Rotation strategies more sophisticated than "round-robin across healthy accounts" (e.g., weighted-by-quota, lowest-latency-first).
+- Lifetime / monthly cost dashboards beyond the 5h + weekly windows.
+- Smarter rotation strategies (weighted-by-remaining-quota, lowest-latency-first). MVP rotates in enrollment order across healthy accounts.
 - Rotation for executors other than Claude Code (Codex, Amp, etc.) — same retry-with-back-off semantics may be desirable later but are not part of this spec.
 
 ## Open Questions / [NEEDS CLARIFICATION]
 
-- **[NEEDS CLARIFICATION]**: Maximum retry attempts default value — proposed 6 — and whether this is exposed as a user-configurable setting in this iteration or hard-coded.
-- **[NEEDS CLARIFICATION]**: Whether the "request count since enrollment" counter should reset on re-auth or persist (proposed: persist).
-- **[NEEDS CLARIFICATION]**: Source of the default account label — Anthropic's OAuth userinfo response (if available) vs. a static "Account N" fallback.
+- **[NEEDS CLARIFICATION]**: Source of the structured 5h-window and weekly-window usage data. Options: (a) parse the Claude CLI's stdout/stderr usage hints, (b) call an Anthropic usage endpoint with the OAuth token, (c) maintain Vibe Kanban's own counter and use the conservative defaults from FR-017 if no real data is available. Defaulting to (c) for the first implementation unless (a) is trivially available.
+- **[NEEDS CLARIFICATION]**: Whether Settings UI shows the 5-hour usage as a raw count (e.g., "120 requests") or as a percentage of a cap (e.g., "42% of 5h cap"). Defaulting to raw count plus, if known, the cap.
