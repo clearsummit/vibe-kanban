@@ -4966,6 +4966,7 @@ dependencies = [
  "chrono",
  "client-info",
  "command-group",
+ "dashmap",
  "db",
  "deployment",
  "dotenv",

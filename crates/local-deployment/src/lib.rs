@@ -253,6 +253,7 @@ impl Deployment for LocalDeployment {
             approvals.clone(),
             queued_message_service.clone(),
             remote_client.clone().ok(),
+            Some(claude_accounts.clone()),
         )
         .await;
 

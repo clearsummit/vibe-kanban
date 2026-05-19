@@ -9,6 +9,7 @@ use std::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use command_group::AsyncGroupChild;
+use dashmap::DashMap;
 use db::{
     DBService,
     models::{
@@ -42,6 +43,9 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
+    claude_accounts::{
+        ClaudeAccountsService, TempCredentialDir, classify_failure, types::FailureClass,
+    },
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -65,6 +69,30 @@ use crate::{command, copy};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 
+/// Collect the accumulated stdout+stderr history from a MsgStore into a single
+/// string, for failure classification. Capped to avoid pathological allocations
+/// on very chatty runs — we only need the last few KB to find error signals.
+async fn collect_msg_store_text(store: &Arc<MsgStore>) -> String {
+    const MAX: usize = 16 * 1024;
+    let mut out = String::new();
+    for msg in store.get_history() {
+        let text = match msg {
+            LogMsg::Stdout(s) | LogMsg::Stderr(s) => s,
+            _ => continue,
+        };
+        if out.len() + text.len() > MAX {
+            let remaining = MAX.saturating_sub(out.len());
+            if remaining > 0 {
+                out.push_str(&text[text.len().saturating_sub(remaining)..]);
+            }
+            break;
+        }
+        out.push_str(&text);
+        out.push('\n');
+    }
+    out
+}
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -85,6 +113,14 @@ pub struct LocalContainerService {
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
     remote_client: Option<RemoteClient>,
+    claude_accounts: Option<Arc<ClaudeAccountsService>>,
+    /// Per-execution-process Claude credential tempdirs. Holds the Drop guard
+    /// for the lifetime of the spawn; cleared in the exit monitor so the dir
+    /// is reaped immediately on exit.
+    claude_spawn_dirs: Arc<DashMap<Uuid, TempCredentialDir>>,
+    /// Tracks which Claude account each running spawn is using, so the exit
+    /// monitor can record success/failure against the right account.
+    claude_spawn_accounts: Arc<DashMap<Uuid, Uuid>>,
 }
 
 impl LocalContainerService {
@@ -100,6 +136,7 @@ impl LocalContainerService {
         approvals: Approvals,
         queued_message_service: QueuedMessageService,
         remote_client: Option<RemoteClient>,
+        claude_accounts: Option<Arc<ClaudeAccountsService>>,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
@@ -125,6 +162,9 @@ impl LocalContainerService {
             queued_message_service,
             notification_service,
             remote_client,
+            claude_accounts,
+            claude_spawn_dirs: Arc::new(DashMap::new()),
+            claude_spawn_accounts: Arc::new(DashMap::new()),
         };
 
         container.spawn_workspace_cleanup();
@@ -477,6 +517,135 @@ impl LocalContainerService {
 
     /// Spawn a background task that polls the child process for completion and
     /// cleans up the execution entry when it exits.
+    /// Materialize the next healthy Claude account's credentials into a fresh
+    /// tempdir and inject the env vars that point the claude CLI at it. Returns
+    /// the Drop-guarded tempdir + the account id chosen, or None if no
+    /// accounts are enrolled / all are unusable (in which case the spawn
+    /// falls back to the user's ambient ~/.claude).
+    async fn prepare_claude_isolation(
+        &self,
+        env: &mut ExecutionEnv,
+    ) -> Option<(TempCredentialDir, Uuid)> {
+        let svc = self.claude_accounts.as_ref()?;
+        if svc.store.count().await == 0 {
+            return None;
+        }
+        let pick = svc.store.pick_next(&[]).await;
+        let account = match pick {
+            services::services::claude_accounts::store::PickNextResult::Account(a) => a,
+            other => {
+                tracing::info!(
+                    ?other,
+                    "no healthy claude account available; falling back to ambient credentials"
+                );
+                return None;
+            }
+        };
+        let creds = match svc.get_active_credentials(account.id).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "failed to refresh credentials for claude account; falling back"
+                );
+                return None;
+            }
+        };
+        let info = services::services::claude_accounts::OauthAccountInfo {
+            uuid: None,
+            email: account.email.clone(),
+            organization_uuid: None,
+        };
+        let dir = match TempCredentialDir::materialize(&creds, Some(&info)) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "failed to materialize claude credential dir; falling back"
+                );
+                return None;
+            }
+        };
+        for (k, v) in dir.env_vars() {
+            env.insert(k, v);
+        }
+        tracing::info!(account_id = %account.id, label = %account.label, "claude spawn: using enrolled account");
+        Some((dir, account.id))
+    }
+
+    /// Called from the exit monitor on every executor exit. If this spawn
+    /// used an enrolled Claude account, classify the failure (or success)
+    /// from the captured msg_store output and record it to the store so the
+    /// account's status flips appropriately (Throttled / NeedsReauth /
+    /// last-error) and the next task attempt rotates to a different account.
+    async fn record_claude_spawn_outcome(
+        &self,
+        exec_id: &Uuid,
+        exit_code: Option<i64>,
+        msg_store: Option<Arc<MsgStore>>,
+    ) {
+        // Always reap the tempdir + account-id mapping.
+        self.claude_spawn_dirs.remove(exec_id);
+        let Some((_, account_id)) = self.claude_spawn_accounts.remove(exec_id) else {
+            return;
+        };
+        let Some(svc) = self.claude_accounts.clone() else {
+            return;
+        };
+
+        // Capture the executor's stderr/stdout for the classifier. If the
+        // msg_store isn't around any more we still record a generic failure.
+        let combined = match msg_store {
+            Some(store) => collect_msg_store_text(&store).await,
+            None => String::new(),
+        };
+
+        let success = exit_code == Some(0);
+        if success {
+            if let Err(e) = svc.record_success(account_id).await {
+                tracing::warn!(?e, %account_id, "failed to record claude account success");
+            }
+            return;
+        }
+
+        // Failure path: classify from the captured output. The classifier is
+        // intentionally conservative — only the exact "Claude AI usage limit
+        // reached" signal flips an account to Throttled.
+        let class = classify_failure(&combined, "", exit_code.map(|c| c as i32));
+        match class {
+            FailureClass::UsageExhausted => {
+                let now = chrono::Utc::now();
+                let (until, reason) = services::services::claude_accounts::parse_usage_reset(
+                    &combined,
+                    now,
+                )
+                .unwrap_or_else(|| {
+                    let reason =
+                        services::services::claude_accounts::types::ClaudeAccountThrottleReason::FiveHour;
+                    (
+                        services::services::claude_accounts::classifier::fallback_reset(reason, now),
+                        reason,
+                    )
+                });
+                if let Err(e) = svc.store.mark_throttled(account_id, until, reason).await {
+                    tracing::warn!(?e, %account_id, "failed to mark claude account throttled");
+                }
+            }
+            FailureClass::NeedsReauth => {
+                let msg = combined.chars().take(512).collect::<String>();
+                if let Err(e) = svc.store.mark_needs_reauth(account_id, msg).await {
+                    tracing::warn!(?e, %account_id, "failed to mark claude account needs reauth");
+                }
+            }
+            FailureClass::Transient | FailureClass::Fatal => {
+                let msg = combined.chars().take(512).collect::<String>();
+                if let Err(e) = svc.store.record_failure(account_id, class, msg).await {
+                    tracing::warn!(?e, %account_id, "failed to record claude account failure");
+                }
+            }
+        }
+    }
+
     fn spawn_exit_monitor(
         &self,
         exec_id: &Uuid,
@@ -538,6 +707,14 @@ impl LocalContainerService {
                 }
                 Err(_) => (None, ExecutionProcessStatus::Failed),
             };
+
+            // If this spawn used an enrolled Claude account, classify the
+            // outcome and flip the account's status (Throttled / NeedsReauth /
+            // last-error). Subsequent task attempts will rotate accordingly.
+            let store_for_outcome = msg_stores.read().await.get(&exec_id).cloned();
+            container
+                .record_claude_spawn_outcome(&exec_id, exit_code, store_for_outcome)
+                .await;
 
             if !ExecutionProcess::was_stopped(&db.pool, exec_id).await
                 && let Err(e) =
@@ -1366,6 +1543,20 @@ impl ContainerService for LocalContainerService {
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
 
+        // Multi-account Claude: pick an account and isolate its credentials
+        // into a per-spawn tempdir. Held by claude_spawn_dirs for the lifetime
+        // of the spawn; reaped in the exit monitor. If no accounts are
+        // enrolled (or this isn't a Claude executor), the spawn falls back to
+        // the user's ambient `~/.claude/`.
+        let claude_isolation = if matches!(
+            executor_action.base_executor(),
+            Some(BaseCodingAgent::ClaudeCode)
+        ) {
+            self.prepare_claude_isolation(&mut env).await
+        } else {
+            None
+        };
+
         // Create the child and stream, add to execution tracker with timeout
         let mut spawned = tokio::time::timeout(
             Duration::from_secs(30),
@@ -1377,6 +1568,14 @@ impl ContainerService for LocalContainerService {
                 "Timeout: process took more than 30 seconds to start"
             ))
         })??;
+
+        // Stash the tempdir + account_id under this execution id for the
+        // exit monitor to reap.
+        if let Some((tempdir, account_id)) = claude_isolation {
+            self.claude_spawn_dirs.insert(execution_process.id, tempdir);
+            self.claude_spawn_accounts
+                .insert(execution_process.id, account_id);
+        }
 
         if let Err(e) = self
             .track_child_msgs_in_store(execution_process.id, &mut spawned.child)
