@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   ArrowSquareOutIcon,
   ArrowUpIcon,
@@ -79,6 +80,7 @@ function useCountdown(targetIso: string | null | undefined): string {
 }
 
 export function ClaudeAccountsSettingsSection() {
+  const { t } = useTranslation('settings');
   const [accounts, setAccounts] = useState<ClaudeAccountView[]>([]);
   const [policy, setPolicy] = useState<ClaudeRetryPolicy | null>(null);
   const [policyDraft, setPolicyDraft] = useState<ClaudeRetryPolicy | null>(
@@ -202,9 +204,11 @@ export function ClaudeAccountsSettingsSection() {
   const removeAccount = useCallback(
     async (account: ClaudeAccountView) => {
       const result = await ConfirmDialog.show({
-        title: 'Remove account?',
-        message: `Locally stored credentials for "${account.label}" will be deleted. You can re-enroll later by signing in again.`,
-        confirmText: 'Remove',
+        title: t('settings.claude-accounts.removeConfirm.title'),
+        message: t('settings.claude-accounts.removeConfirm.message', {
+          label: account.label,
+        }),
+        confirmText: t('settings.claude-accounts.removeConfirm.confirm'),
         variant: 'destructive',
       });
       if (result === 'confirmed') {
@@ -212,7 +216,7 @@ export function ClaudeAccountsSettingsSection() {
         await refresh();
       }
     },
-    [refresh]
+    [refresh, t]
   );
 
   const renameAccount = useCallback(
@@ -241,17 +245,19 @@ export function ClaudeAccountsSettingsSection() {
   return (
     <div className="space-y-6 pb-8">
       <SettingsCard
-        title="Claude Accounts"
-        description="Enroll multiple Claude OAuth accounts so Vibe Kanban can rotate when one hits its 5-hour or weekly usage cap."
+        title={t('settings.claude-accounts.title')}
+        description={t('settings.claude-accounts.description')}
       >
         {loading ? (
           <div className="flex items-center gap-2 text-sm text-low">
-            <SpinnerIcon className="animate-spin" /> Loading…
+            <SpinnerIcon className="animate-spin" />{' '}
+            {t('settings.claude-accounts.loading')}
           </div>
         ) : loadError ? (
           <div className="space-y-3">
             <p className="text-sm text-red-500 flex items-center gap-1">
-              <WarningIcon /> Failed to load Claude accounts: {loadError}
+              <WarningIcon /> {t('settings.claude-accounts.loadError')}{' '}
+              {loadError}
             </p>
             <button
               type="button"
@@ -260,35 +266,47 @@ export function ClaudeAccountsSettingsSection() {
               }}
               className="text-sm underline text-brand"
             >
-              Retry
+              {t('settings.claude-accounts.retry')}
             </button>
           </div>
         ) : accounts.length === 0 ? (
           <div className="space-y-3">
             <p className="text-sm text-low">
-              No Claude accounts enrolled yet. Vibe Kanban will fall back to the
-              credentials in your ambient <code>~/.claude/</code> directory.
+              {t('settings.claude-accounts.emptyState')}
             </p>
             <PrimaryButton onClick={() => startAdd(null)}>
-              <PlusIcon /> Add account
+              <PlusIcon /> {t('settings.claude-accounts.addAccount')}
             </PrimaryButton>
           </div>
         ) : (
           <div className="space-y-3 overflow-x-auto">
             <p className="text-xs text-low">
-              Rotation order: accounts higher in this list are picked first.
-              Use the arrows to re-order.
+              {t('settings.claude-accounts.orderHint')}
             </p>
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr className="text-left text-low border-b border-border">
-                  <th className="py-2 pr-3 font-medium">Order</th>
-                  <th className="py-2 pr-3 font-medium">Account</th>
-                  <th className="py-2 pr-3 font-medium">Status</th>
-                  <th className="py-2 pr-3 font-medium">5-hour usage</th>
-                  <th className="py-2 pr-3 font-medium">5-hour reset</th>
-                  <th className="py-2 pr-3 font-medium">Weekly usage</th>
-                  <th className="py-2 pr-3 font-medium">Weekly reset</th>
+                  <th className="py-2 pr-3 font-medium">
+                    {t('settings.claude-accounts.columns.order')}
+                  </th>
+                  <th className="py-2 pr-3 font-medium">
+                    {t('settings.claude-accounts.columns.account')}
+                  </th>
+                  <th className="py-2 pr-3 font-medium">
+                    {t('settings.claude-accounts.columns.status')}
+                  </th>
+                  <th className="py-2 pr-3 font-medium">
+                    {t('settings.claude-accounts.columns.fiveHourUsage')}
+                  </th>
+                  <th className="py-2 pr-3 font-medium">
+                    {t('settings.claude-accounts.columns.fiveHourReset')}
+                  </th>
+                  <th className="py-2 pr-3 font-medium">
+                    {t('settings.claude-accounts.columns.weeklyUsage')}
+                  </th>
+                  <th className="py-2 pr-3 font-medium">
+                    {t('settings.claude-accounts.columns.weeklyReset')}
+                  </th>
                   <th className="py-2 pr-3 font-medium"></th>
                 </tr>
               </thead>
@@ -311,19 +329,21 @@ export function ClaudeAccountsSettingsSection() {
               </tbody>
             </table>
             <PrimaryButton onClick={() => startAdd(null)}>
-              <PlusIcon /> Add account
+              <PlusIcon /> {t('settings.claude-accounts.addAccount')}
             </PrimaryButton>
           </div>
         )}
       </SettingsCard>
 
       <SettingsCard
-        title="Retry policy"
-        description="When Claude returns a transient error (400/5xx/network), Vibe Kanban retries the same account with exponential back-off. When an account hits its 5-hour or weekly cap, Vibe Kanban rotates to the next healthy account. Set max_attempts to 0 to disable retry entirely."
+        title={t('settings.claude-accounts.retryPolicy.title')}
+        description={t('settings.claude-accounts.retryPolicy.description')}
       >
         {policyDraft && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <SettingsField label="Maximum retry attempts">
+            <SettingsField
+              label={t('settings.claude-accounts.retryPolicy.maxAttempts')}
+            >
               <SettingsInput
                 value={String(policyDraft.max_attempts)}
                 onChange={(v) =>
@@ -335,10 +355,12 @@ export function ClaudeAccountsSettingsSection() {
                 placeholder="6"
               />
               <p className="text-xs text-low mt-1">
-                Per task attempt. 0 disables retry.
+                {t('settings.claude-accounts.retryPolicy.maxAttemptsHint')}
               </p>
             </SettingsField>
-            <SettingsField label="Initial back-off (seconds)">
+            <SettingsField
+              label={t('settings.claude-accounts.retryPolicy.initialBackoff')}
+            >
               <SettingsInput
                 value={String(policyDraft.initial_backoff_seconds)}
                 onChange={(v) =>
@@ -350,10 +372,12 @@ export function ClaudeAccountsSettingsSection() {
                 placeholder="30"
               />
               <p className="text-xs text-low mt-1">
-                First retry delay. Default 30.
+                {t('settings.claude-accounts.retryPolicy.initialBackoffHint')}
               </p>
             </SettingsField>
-            <SettingsField label="Back-off multiplier">
+            <SettingsField
+              label={t('settings.claude-accounts.retryPolicy.multiplier')}
+            >
               <SettingsInput
                 value={String(policyDraft.backoff_multiplier)}
                 onChange={(v) =>
@@ -365,10 +389,12 @@ export function ClaudeAccountsSettingsSection() {
                 placeholder="2.0"
               />
               <p className="text-xs text-low mt-1">
-                Each retry multiplies the delay. Default 2.0.
+                {t('settings.claude-accounts.retryPolicy.multiplierHint')}
               </p>
             </SettingsField>
-            <SettingsField label="Maximum back-off (seconds)">
+            <SettingsField
+              label={t('settings.claude-accounts.retryPolicy.maxBackoff')}
+            >
               <SettingsInput
                 value={String(policyDraft.max_backoff_seconds)}
                 onChange={(v) =>
@@ -380,7 +406,7 @@ export function ClaudeAccountsSettingsSection() {
                 placeholder="300"
               />
               <p className="text-xs text-low mt-1">
-                Hard cap on a single retry delay. Default 300.
+                {t('settings.claude-accounts.retryPolicy.maxBackoffHint')}
               </p>
             </SettingsField>
           </div>
@@ -391,7 +417,9 @@ export function ClaudeAccountsSettingsSection() {
           </p>
         )}
         {policySuccess && (
-          <p className="text-sm text-emerald-500 mt-2">Saved.</p>
+          <p className="text-sm text-emerald-500 mt-2">
+            {t('settings.claude-accounts.retryPolicy.saved')}
+          </p>
         )}
         <SettingsSaveBar
           show={policyDirty}
@@ -440,6 +468,7 @@ function AccountRow({
   onRequestRemove: () => void;
   onReauth: () => void;
 }) {
+  const { t } = useTranslation('settings');
   const status = describeStatus(account.status);
   const fiveHourCountdown = useCountdown(account.five_hour_window.reset_at);
   const weeklyCountdown = useCountdown(account.weekly_window.reset_at);
@@ -474,7 +503,7 @@ function AccountRow({
           </span>
           <button
             type="button"
-            aria-label="Move up in rotation order"
+            aria-label={t('settings.claude-accounts.actions.moveUp')}
             disabled={!canMoveUp}
             onClick={onMoveUp}
             className="p-0.5 disabled:opacity-30 hover:text-normal transition-colors"
@@ -483,7 +512,7 @@ function AccountRow({
           </button>
           <button
             type="button"
-            aria-label="Move down in rotation order"
+            aria-label={t('settings.claude-accounts.actions.moveDown')}
             disabled={!canMoveDown}
             onClick={onMoveDown}
             className="p-0.5 disabled:opacity-30 hover:text-normal transition-colors"
@@ -552,7 +581,7 @@ function AccountRow({
               className="text-xs underline text-brand"
               onClick={onReauth}
             >
-              Re-auth
+              {t('settings.claude-accounts.actions.reauth')}
             </button>
           )}
           <button
@@ -560,11 +589,13 @@ function AccountRow({
             className="text-xs underline text-low"
             onClick={onToggleDisabled}
           >
-            {account.status === 'disabled' ? 'Enable' : 'Disable'}
+            {account.status === 'disabled'
+              ? t('settings.claude-accounts.actions.enable')
+              : t('settings.claude-accounts.actions.disable')}
           </button>
           <button
             type="button"
-            aria-label="Remove account"
+            aria-label={t('settings.claude-accounts.actions.remove')}
             onClick={onRequestRemove}
             className="p-1 text-low hover:text-red-500 transition-colors"
           >

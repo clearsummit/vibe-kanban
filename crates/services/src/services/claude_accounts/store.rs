@@ -56,11 +56,13 @@ impl ClaudeAccountsStore {
         let bytes = std::fs::read(&self.path)?;
         match serde_json::from_slice::<Vec<ClaudeAccount>>(&bytes) {
             Ok(mut loaded) => {
-                // Backfill precedence for accounts persisted before the field
-                // existed (all defaulted to 0 by serde). If we see more than
-                // one zero, assign each a stable sequential precedence based
-                // on its created_at order so they actually sort.
-                if loaded.iter().filter(|a| a.precedence == 0).count() > 1 {
+                // Backfill precedence ONLY when every account is precedence
+                // 0 — i.e. a true pre-precedence-field load. If the user has
+                // any non-zero values (they reordered before adding a new
+                // account), preserve them and let the new account keep its
+                // 0 slot until the user reorders again. Otherwise this
+                // backfill would silently clobber the user-configured order.
+                if !loaded.is_empty() && loaded.iter().all(|a| a.precedence == 0) {
                     let mut indices: Vec<usize> = (0..loaded.len()).collect();
                     indices.sort_by_key(|i| loaded[*i].created_at);
                     for (new_p, idx) in indices.into_iter().enumerate() {
@@ -247,7 +249,24 @@ impl ClaudeAccountsStore {
         acct.status = if disabled {
             ClaudeAccountStatus::Disabled
         } else if acct.status == ClaudeAccountStatus::Disabled {
-            ClaudeAccountStatus::Active
+            // Restore the appropriate runtime state on re-enable. A user
+            // toggling Disable → Enable must not bypass an active
+            // throttled-until or a pending NeedsReauth — otherwise the
+            // rotator would happily pick the account again.
+            let now = Utc::now();
+            if acct.throttled_until.map(|t| t > now).unwrap_or(false) {
+                ClaudeAccountStatus::Throttled
+            } else if matches!(
+                acct.last_error.as_ref().map(|e| e.classification),
+                Some(FailureClass::NeedsReauth)
+            ) {
+                ClaudeAccountStatus::NeedsReauth
+            } else {
+                // Expired throttle / no auth issue — safe to go Active.
+                acct.throttled_until = None;
+                acct.throttle_reason = None;
+                ClaudeAccountStatus::Active
+            }
         } else {
             acct.status
         };
@@ -281,6 +300,19 @@ impl ClaudeAccountsStore {
         acct.status = ClaudeAccountStatus::Throttled;
         acct.throttled_until = Some(until);
         acct.throttle_reason = Some(reason);
+        // Also surface the reset time on the corresponding usage window so
+        // the Settings UI's 5-hour / weekly reset columns show a real
+        // timestamp (FR-026 / FR-027). The "other" window keeps whatever
+        // value it had — a 5h cap doesn't tell us anything about the
+        // weekly reset, and vice versa.
+        match reason {
+            ClaudeAccountThrottleReason::FiveHour => {
+                acct.five_hour_window.reset_at = Some(until);
+            }
+            ClaudeAccountThrottleReason::Weekly => {
+                acct.weekly_window.reset_at = Some(until);
+            }
+        }
         self.save_locked(&guard).await?;
         Ok(())
     }

@@ -1749,9 +1749,7 @@ export const claudeAccountsApi = {
     const response = await makeRequest(`/api/claude-accounts/${id}`, {
       method: 'DELETE',
     });
-    if (!response.ok && response.status !== 204) {
-      throw new Error(`Failed to remove account: ${response.statusText}`);
-    }
+    return handleApiResponse<void>(response);
   },
 
   reorder: async (

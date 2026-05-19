@@ -46,9 +46,14 @@ async fn list_accounts(
 
 async fn oauth_start(
     State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<ClaudeOAuthStartRequest>,
+    // The body is OPTIONAL per the OpenAPI contract — a client enrolling
+    // a fresh account doesn't need to send anything. Only re-auth flows
+    // include `account_id`. Default to None when the request has no body
+    // or `{}`.
+    payload: Option<Json<ClaudeOAuthStartRequest>>,
 ) -> Result<ResponseJson<ApiResponse<ClaudeOAuthStartResponse>>, ApiError> {
-    let resp = deployment.claude_accounts().oauth.start(payload.account_id);
+    let account_id = payload.and_then(|Json(p)| p.account_id);
+    let resp = deployment.claude_accounts().oauth.start(account_id);
     Ok(ResponseJson(ApiResponse::success(resp)))
 }
 
