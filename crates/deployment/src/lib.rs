@@ -17,6 +17,7 @@ use services::services::{
     analytics::AnalyticsService,
     approvals::Approvals,
     auth::AuthContext,
+    claude_accounts::ClaudeAccountsService,
     config::{Config, ConfigError},
     container::{ContainerError, ContainerService},
     events::{EventError, EventService},
@@ -107,6 +108,8 @@ pub trait Deployment: Clone + Send + Sync + 'static {
     fn queued_message_service(&self) -> &QueuedMessageService;
 
     fn auth_context(&self) -> &AuthContext;
+
+    fn claude_accounts(&self) -> &Arc<ClaudeAccountsService>;
 
     fn relay_control(&self) -> &Arc<RelayControl>;
 

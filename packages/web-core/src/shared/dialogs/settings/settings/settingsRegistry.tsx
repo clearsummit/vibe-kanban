@@ -4,6 +4,7 @@ import {
   BuildingsIcon,
   CloudIcon,
   CpuIcon,
+  KeyIcon,
   PlugIcon,
   BroadcastIcon,
 } from '@phosphor-icons/react';
@@ -13,6 +14,7 @@ import { ReposSettingsSection } from './ReposSettingsSection';
 import { OrganizationsSettingsSection } from './OrganizationsSettingsSection';
 import { RemoteProjectsSettingsSection } from './RemoteProjectsSettingsSection';
 import { AgentsSettingsSection } from './AgentsSettingsSection';
+import { ClaudeAccountsSettingsSection } from './ClaudeAccountsSettingsSection';
 import { McpSettingsSection } from './McpSettingsSection';
 import { RelaySettingsSectionContent } from './RelaySettingsSection';
 
@@ -22,6 +24,7 @@ export type SettingsSectionType =
   | 'organizations'
   | 'remote-projects'
   | 'agents'
+  | 'claude-accounts'
   | 'mcp'
   | 'relay';
 
@@ -35,6 +38,7 @@ export type SettingsSectionInitialState = {
     | { organizationId?: string; projectId?: string }
     | undefined;
   agents: { executor?: string; variant?: string } | undefined;
+  'claude-accounts': undefined;
   mcp: undefined;
   relay: { hostId?: string } | undefined;
 };
@@ -49,6 +53,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'general', icon: GearIcon, group: 'host' },
   { id: 'repos', icon: GitBranchIcon, group: 'host' },
   { id: 'agents', icon: CpuIcon, group: 'host' },
+  { id: 'claude-accounts', icon: KeyIcon, group: 'host' },
   { id: 'mcp', icon: PlugIcon, group: 'host' },
   { id: 'organizations', icon: BuildingsIcon, group: 'universal' },
   { id: 'remote-projects', icon: CloudIcon, group: 'universal' },
@@ -90,6 +95,8 @@ export function renderSettingsSection(
       );
     case 'agents':
       return <AgentsSettingsSection />;
+    case 'claude-accounts':
+      return <ClaudeAccountsSettingsSection />;
     case 'mcp':
       return <McpSettingsSection />;
     case 'relay':

@@ -488,7 +488,7 @@ export type DirectoryListResponse = { entries: Array<DirectoryEntry>, current_pa
 
 export type SearchMode = "taskform" | "settings";
 
-export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, remote_onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, commit_reminder_enabled: boolean, commit_reminder_prompt: string | null, send_message_shortcut: SendMessageShortcut, relay_enabled: boolean, host_nickname: string | null, };
+export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, remote_onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, commit_reminder_enabled: boolean, commit_reminder_prompt: string | null, send_message_shortcut: SendMessageShortcut, relay_enabled: boolean, host_nickname: string | null, claude_retry_policy: ClaudeRetryPolicy, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -882,6 +882,64 @@ sdp: string,
  * Echoed session identifier from the offer.
  */
 session_id: string, };
+
+export type ClaudeAccount = { id: string, label: string, email: string | null, created_at: string, last_used_at: string | null, status: ClaudeAccountStatus, throttled_until: string | null, throttle_reason: ClaudeAccountThrottleReason | null, five_hour_window: ClaudeAccountUsageWindow, weekly_window: ClaudeAccountUsageWindow, last_error: ClaudeAccountLastError | null, 
+/**
+ * User-configurable rotation precedence. Lower values are picked first.
+ * On enroll, assigned to `max(existing) + 1` so new accounts go to the
+ * end of the rotation order. Re-orderable from Settings.
+ */
+precedence: number, };
+
+export type ClaudeAccountView = { id: string, label: string, email: string | null, created_at: string, last_used_at: string | null, status: ClaudeAccountStatus, throttled_until: string | null, throttle_reason: ClaudeAccountThrottleReason | null, five_hour_window: ClaudeAccountUsageWindow, weekly_window: ClaudeAccountUsageWindow, last_error: ClaudeAccountLastError | null, precedence: number, };
+
+export type ClaudeAccountStatus = "active" | "throttled" | "needs_reauth" | "disabled";
+
+export type ClaudeAccountThrottleReason = "five_hour" | "weekly";
+
+export type ClaudeAccountUsageWindow = { used: number, reset_at: string | null, };
+
+export type ClaudeAccountLastError = { message: string, classification: FailureClass, occurred_at: string, };
+
+export type FailureClass = "transient" | "usage_exhausted" | "needs_reauth" | "fatal";
+
+export type ClaudeRetryPolicy = { 
+/**
+ * Maximum retry attempts per task attempt. `0` disables retry entirely.
+ */
+max_attempts: number, 
+/**
+ * First back-off delay in seconds.
+ */
+initial_backoff_seconds: number, 
+/**
+ * Multiplier applied per attempt (e.g. 2.0 doubles each time).
+ */
+backoff_multiplier: number, 
+/**
+ * Hard cap on a single back-off in seconds.
+ */
+max_backoff_seconds: number, };
+
+export type ClaudeOAuthStartRequest = { account_id: string | null, };
+
+export type ClaudeOAuthStartResponse = { auth_url: string, state: string, };
+
+export type ClaudeOAuthCompleteRequest = { state: string, code: string, };
+
+export type UpdateClaudeAccount = { label: string | null, disabled: boolean | null, };
+
+export type ReorderClaudeAccounts = { 
+/**
+ * Full desired ordering by account id. **The first id is picked
+ * first** by the rotator. The backend assigns precedence by
+ * position (`order[0]` → precedence 0, `order[1]` → precedence 1,
+ * …); lower numeric precedence = higher priority. Ids not present
+ * in this list keep their existing relative order at the end —
+ * defensive against stale clients that miss a newly-enrolled
+ * account.
+ */
+order: Array<string>, };
 
 export const DEFAULT_PR_DESCRIPTION_PROMPT = "Update the PR that was just created with a better title and description.\nThe PR number is #{pr_number} and the URL is {pr_url}.\n\nAnalyze the changes in this branch and write:\n1. A concise, descriptive title that summarizes the changes, postfixed with \"(Vibe Kanban)\"\n2. A detailed description that explains:\n   - What changes were made\n   - Why they were made (based on the task context)\n   - Any important implementation details\n   - At the end, include a note: \"This PR was written using [Vibe Kanban](https://vibekanban.com)\"\n\nUse the appropriate CLI tool to update the PR (gh pr edit for GitHub, az repos pr update for Azure DevOps).";
 

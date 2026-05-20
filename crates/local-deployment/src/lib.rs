@@ -19,6 +19,9 @@ use services::services::{
     analytics::{AnalyticsConfig, AnalyticsContext, AnalyticsService, generate_user_id},
     approvals::Approvals,
     auth::AuthContext,
+    claude_accounts::{
+        ClaudeAccountsService, ClaudeAccountsStore, ClaudeOAuthClient, ClaudeRetryState, isolation,
+    },
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -35,7 +38,10 @@ use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use trusted_key_auth::runtime::TrustedKeyAuthRuntime;
 use utils::{
-    assets::{config_path, credentials_path, server_signing_key_path, trusted_keys_path},
+    assets::{
+        claude_accounts_path, config_path, credentials_path, server_signing_key_path,
+        trusted_keys_path,
+    },
     msg_store::MsgStore,
 };
 use uuid::Uuid;
@@ -66,6 +72,7 @@ pub struct LocalDeployment {
     queued_message_service: QueuedMessageService,
     remote_client: Result<RemoteClient, RemoteClientNotConfigured>,
     auth_context: AuthContext,
+    claude_accounts: Arc<ClaudeAccountsService>,
     oauth_handoffs: Arc<RwLock<HashMap<Uuid, PendingHandoff>>>,
     trusted_key_auth: TrustedKeyAuthRuntime,
     relay_signing: RelaySigningService,
@@ -168,6 +175,20 @@ impl Deployment for LocalDeployment {
         let profile_cache = Arc::new(RwLock::new(None));
         let auth_context = AuthContext::new(oauth_credentials.clone(), profile_cache.clone());
 
+        // Multi-account Claude store.
+        let claude_store = Arc::new(ClaudeAccountsStore::new(claude_accounts_path()));
+        if let Err(e) = claude_store.load().await {
+            tracing::warn!(?e, "failed to load claude_accounts.json");
+        }
+        let claude_oauth = Arc::new(ClaudeOAuthClient::new());
+        let claude_accounts = Arc::new(ClaudeAccountsService::new(
+            claude_store.clone(),
+            claude_oauth.clone(),
+        ));
+        // Best-effort startup sweeps.
+        isolation::sweep_orphaned_tmp_dirs(chrono::Utc::now());
+        ClaudeRetryState::sweep_stale(chrono::Utc::now());
+
         let api_base = std::env::var("VK_SHARED_API_BASE")
             .ok()
             .or_else(|| option_env!("VK_SHARED_API_BASE").map(|s| s.to_string()));
@@ -231,8 +252,19 @@ impl Deployment for LocalDeployment {
             approvals.clone(),
             queued_message_service.clone(),
             remote_client.clone().ok(),
+            Some(claude_accounts.clone()),
         )
         .await;
+
+        // Resume any Claude retries that were sleeping on back-off when we
+        // last shut down (spec FR-022 + FR-023 + SC-010). Runs in the
+        // background so it doesn't block startup.
+        {
+            let container = container.clone();
+            tokio::spawn(async move {
+                container.resume_pending_claude_retries().await;
+            });
+        }
 
         let events = EventService::new(db.clone(), events_msg_store, events_entry_count);
 
@@ -280,6 +312,7 @@ impl Deployment for LocalDeployment {
             queued_message_service,
             remote_client,
             auth_context,
+            claude_accounts,
             oauth_handoffs,
             trusted_key_auth,
             relay_signing,
@@ -352,6 +385,10 @@ impl Deployment for LocalDeployment {
 
     fn auth_context(&self) -> &AuthContext {
         &self.auth_context
+    }
+
+    fn claude_accounts(&self) -> &Arc<ClaudeAccountsService> {
+        &self.claude_accounts
     }
 
     fn relay_control(&self) -> &Arc<RelayControl> {

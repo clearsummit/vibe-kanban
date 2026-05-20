@@ -52,6 +52,30 @@ pub fn relay_host_credentials_path() -> std::path::PathBuf {
     asset_dir().join("relay_host_credentials.json")
 }
 
+pub fn claude_accounts_path() -> std::path::PathBuf {
+    asset_dir().join("claude_accounts.json")
+}
+
+pub fn claude_retry_state_dir() -> std::path::PathBuf {
+    let dir = asset_dir().join("claude_retry_state");
+    if !dir.exists()
+        && let Err(e) = std::fs::create_dir_all(&dir)
+    {
+        tracing::warn!(?e, path = ?dir, "failed to create claude_retry_state dir");
+    }
+    dir
+}
+
+pub fn claude_spawn_tmp_dir() -> std::path::PathBuf {
+    let dir = asset_dir().join("claude_spawn_tmp");
+    if !dir.exists()
+        && let Err(e) = std::fs::create_dir_all(&dir)
+    {
+        tracing::warn!(?e, path = ?dir, "failed to create claude_spawn_tmp dir");
+    }
+    dir
+}
+
 #[derive(RustEmbed)]
 #[folder = "../../assets/sounds"]
 pub struct SoundAssets;
