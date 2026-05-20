@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowSquareOutIcon,
@@ -71,17 +79,23 @@ function formatLocal(ts: string | null | undefined): string {
   return date.toLocaleString();
 }
 
+/// Shared 1-Hz ticker. The section owns one interval and broadcasts the
+/// current time via context; every row reads from it instead of spawning
+/// its own setInterval. With N accounts and up to 3 countdowns per row,
+/// this drops the timer count from O(N) (e.g. 10 accounts → 30 intervals)
+/// to O(1).
+const NowContext = createContext<number>(Date.now());
+
+function useSharedNow(): number {
+  return useContext(NowContext);
+}
+
 function useCountdown(targetIso: string | null | undefined): string {
-  const [now, setNow] = useState(() => Date.now());
+  const now = useSharedNow();
   const target = useMemo(() => {
     if (!targetIso) return Number.NaN;
     return new Date(targetIso).getTime();
   }, [targetIso]);
-  useEffect(() => {
-    if (!targetIso || Number.isNaN(target)) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [targetIso, target]);
   // Invalid input or no target: render nothing rather than "NaNs".
   if (!targetIso || Number.isNaN(target)) return '';
   const remaining = Math.max(0, target - now);
@@ -162,6 +176,10 @@ export function ClaudeAccountsSettingsSection() {
   }, [policyDraft]);
 
   const startAdd = useCallback(async (accountId: string | null) => {
+    // If the OAuth start call fails, KEEP THE MODAL CLOSED and surface the
+    // error via the existing loadError banner. Opening a modal with an
+    // empty authUrl and no usable state produces a broken "Open claude.ai"
+    // link and a confusing UX where the user can't proceed.
     try {
       const resp = await claudeAccountsApi.startOAuth({
         account_id: accountId,
@@ -175,14 +193,9 @@ export function ClaudeAccountsSettingsSection() {
         accountId,
       });
     } catch (e) {
-      setAddState({
-        state: '',
-        authUrl: '',
-        code: '',
-        exchanging: false,
-        error: e instanceof Error ? e.message : String(e),
-        accountId,
-      });
+      setLoadError(
+        `Failed to start Claude OAuth: ${e instanceof Error ? e.message : String(e)}`
+      );
     }
   }, []);
 
@@ -273,7 +286,16 @@ export function ClaudeAccountsSettingsSection() {
     [accounts]
   );
 
+  // Single 1-Hz ticker for ALL countdowns in this section. Each row reads
+  // from NowContext instead of spawning its own setInterval (see useCountdown).
+  const [sharedNow, setSharedNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setSharedNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   return (
+    <NowContext.Provider value={sharedNow}>
     <div className="space-y-6 pb-8">
       <SettingsCard
         title={t('settings.claude-accounts.title')}
@@ -475,6 +497,7 @@ export function ClaudeAccountsSettingsSection() {
         />
       )}
     </div>
+    </NowContext.Provider>
   );
 }
 

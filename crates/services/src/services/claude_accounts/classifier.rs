@@ -121,15 +121,35 @@ pub fn parse_usage_reset(
 
 /// Conservative fallback reset times when the CLI doesn't surface a structured
 /// timestamp (per spec FR-017 / edge case "Unknown usage window").
+///
+/// These are intentionally pessimistic — the rotator will use the real reset
+/// timestamp on the NEXT successful spawn that surfaces one, so getting the
+/// fallback wrong only matters for the brief window between cap-hit and the
+/// next status update.
 pub fn fallback_reset(reason: ClaudeAccountThrottleReason, now: DateTime<Utc>) -> DateTime<Utc> {
     match reason {
         ClaudeAccountThrottleReason::FiveHour => now + ChronoDuration::hours(1),
         ClaudeAccountThrottleReason::Weekly => {
-            // End of current ISO week, UTC.
-            let week_seconds = 7 * 24 * 3600;
-            let now_ts = now.timestamp();
-            let next_week = ((now_ts / week_seconds) + 1) * week_seconds;
-            DateTime::<Utc>::from_timestamp(next_week, 0).unwrap_or(now + ChronoDuration::days(7))
+            // Next Monday 00:00 UTC. Anthropic's weekly cap aligns with ISO
+            // weeks (Monday–Sunday). chrono's `Weekday::Mon.num_days_from_monday()`
+            // is 0, so we compute "days until next Monday" as
+            //   ((7 - now_weekday) % 7), with a guard for already-Monday
+            //   (return next Monday, not today).
+            use chrono::{Datelike, Timelike};
+            let now_weekday = now.weekday().num_days_from_monday() as i64;
+            let mut days_until_next_monday = (7 - now_weekday) % 7;
+            if days_until_next_monday == 0 {
+                days_until_next_monday = 7;
+            }
+            let next_monday_date = now.date_naive() + ChronoDuration::days(days_until_next_monday);
+            next_monday_date
+                .and_hms_opt(0, 0, 0)
+                .and_then(|naive| naive.and_local_timezone(Utc).single())
+                .unwrap_or_else(|| {
+                    // Pathological fallback if date arithmetic somehow fails.
+                    let _ = now.hour(); // touch Timelike import so it's not unused
+                    now + ChronoDuration::days(7)
+                })
         }
     }
 }
@@ -264,5 +284,42 @@ mod tests {
         let now = Utc::now();
         let stdout = "Claude AI usage limit reached, please try again after 5:20pm";
         assert!(parse_usage_reset(stdout, now).is_none());
+    }
+
+    #[test]
+    fn fallback_reset_weekly_is_next_monday_midnight_utc() {
+        use chrono::{Datelike, TimeZone, Timelike};
+        // Pick a known Wednesday — 2026-05-13.
+        let wed = Utc.with_ymd_and_hms(2026, 5, 13, 9, 30, 0).unwrap();
+        assert_eq!(
+            wed.weekday().num_days_from_monday(),
+            2,
+            "sanity: chosen date must be Wednesday"
+        );
+        let reset = fallback_reset(ClaudeAccountThrottleReason::Weekly, wed);
+        assert_eq!(
+            reset.weekday().num_days_from_monday(),
+            0,
+            "weekly reset must land on a Monday"
+        );
+        assert_eq!(reset.hour(), 0);
+        assert_eq!(reset.minute(), 0);
+        assert!(reset > wed, "reset must be strictly after now");
+    }
+
+    #[test]
+    fn fallback_reset_weekly_when_today_is_monday_returns_next_monday() {
+        use chrono::{Datelike, TimeZone};
+        // A Monday — 2026-05-11.
+        let mon = Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap();
+        assert_eq!(mon.weekday().num_days_from_monday(), 0);
+        let reset = fallback_reset(ClaudeAccountThrottleReason::Weekly, mon);
+        // Must be the FOLLOWING Monday, not today.
+        assert!(reset > mon);
+        assert_eq!(reset.weekday().num_days_from_monday(), 0);
+        // Mon 12:00 → next Mon 00:00 = 6.5 days; (reset - mon) is ChronoDuration,
+        // and num_days() on it truncates to 6.
+        let delta: ChronoDuration = reset - mon;
+        assert_eq!(delta.num_days(), 6);
     }
 }
